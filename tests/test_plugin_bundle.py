@@ -6,9 +6,37 @@ from pathlib import Path
 import yaml
 
 from mihomo_ai_failover import __version__
+from mihomo_ai_failover.installer import INSTALL_CONFIRMATION
+from mihomo_ai_failover.mcp_server import (
+    CONFIG_WRITE_CONFIRMATION,
+    SERVICE_START_CONFIRMATION,
+    SERVICE_STOP_CONFIRMATION,
+)
+from mihomo_ai_failover.profiles import ROLLBACK_CONFIRMATION
+from mihomo_ai_failover.service import SERVICE_UNINSTALL_CONFIRMATION
 
 ROOT = Path(__file__).parents[1]
 PLUGIN = ROOT / "plugins" / "mihomo-ai-failover"
+SKILL = PLUGIN / "skills" / "openai-network-failover" / "SKILL.md"
+
+READ_ONLY_TOOLS = {
+    "diagnose_environment",
+    "get_status",
+    "run_health_check",
+    "list_pools",
+    "get_recent_events",
+    "preview_install",
+    "simulate_failover",
+    "get_service_status",
+}
+MUTATION_TOOLS = {
+    "initialize_config": CONFIG_WRITE_CONFIRMATION,
+    "install_failover": INSTALL_CONFIRMATION,
+    "start_monitor": SERVICE_START_CONFIRMATION,
+    "stop_monitor": SERVICE_STOP_CONFIRMATION,
+    "rollback_profile": ROLLBACK_CONFIRMATION,
+    "uninstall_monitor": SERVICE_UNINSTALL_CONFIRMATION,
+}
 
 
 def _json(path: Path) -> dict:
@@ -37,12 +65,13 @@ def test_mcp_launcher_is_local_stdio_and_release_pinned() -> None:
 
 
 def test_skill_frontmatter_and_marketplaces_reference_real_plugin() -> None:
-    skill_path = PLUGIN / "skills" / "openai-network-failover" / "SKILL.md"
-    text = skill_path.read_text(encoding="utf-8")
+    text = SKILL.read_text(encoding="utf-8")
     _, frontmatter, _ = text.split("---", 2)
     metadata = yaml.safe_load(frontmatter)
     assert metadata["name"] == "openai-network-failover"
     assert "Diagnose" in metadata["description"]
+    assert metadata["license"] == "MIT"
+    assert "macOS" in metadata["compatibility"]
 
     codex_market = _json(ROOT / ".agents" / "plugins" / "marketplace.json")
     claude_market = _json(ROOT / ".claude-plugin" / "marketplace.json")
@@ -50,3 +79,47 @@ def test_skill_frontmatter_and_marketplaces_reference_real_plugin() -> None:
     assert codex_market["plugins"][0]["source"]["path"] == expected
     assert claude_market["plugins"][0]["source"] == expected
     assert (ROOT / expected).is_dir()
+
+
+def test_agent_contract_is_discoverable_and_covers_every_mcp_tool() -> None:
+    skill = SKILL.read_text(encoding="utf-8")
+    integration = (ROOT / "docs" / "agent-integration.md").read_text(encoding="utf-8")
+    plugin_readme = (PLUGIN / "README.md").read_text(encoding="utf-8")
+
+    canonical_path = "plugins/mihomo-ai-failover/skills/openai-network-failover/SKILL.md"
+    for readme in ("README.md", "README.zh-CN.md"):
+        text = (ROOT / readme).read_text(encoding="utf-8")
+        assert canonical_path in text
+        assert "docs/agent-integration.md" in text
+
+    assert "skills/openai-network-failover/SKILL.md" in plugin_readme
+    for heading in (
+        "## When to use this skill",
+        "## Authority and trust",
+        "## Non-negotiable boundaries",
+        "## Classify evidence correctly",
+        "## Stop and ask the user",
+        "## Report results",
+    ):
+        assert heading in skill
+
+    for tool in READ_ONLY_TOOLS | MUTATION_TOOLS.keys():
+        marker = f"`{tool}`"
+        assert marker in skill
+        assert marker in integration
+
+    for confirmation in MUTATION_TOOLS.values():
+        assert f"`{confirmation}`" in integration
+
+
+def test_agent_contract_preserves_failover_and_privacy_boundaries() -> None:
+    skill = SKILL.read_text(encoding="utf-8")
+    required_phrases = (
+        "two consecutive hard failures against the same target",
+        "Never enable TUN",
+        "Never modify Mihomo's generated runtime YAML",
+        "Do not call an installation or service mutation during diagnosis",
+        "Never include controller secrets",
+    )
+    for phrase in required_phrases:
+        assert phrase in skill

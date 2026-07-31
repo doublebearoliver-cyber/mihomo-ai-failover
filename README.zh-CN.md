@@ -6,8 +6,15 @@
 
 > 当前版本：`0.1.0` 公开预览。默认继续使用 macOS 系统代理，不启用 TUN。
 
-[English](README.md) · [架构](docs/architecture.md) ·
-[Agent 接入](docs/agent-integration.md) · [验收清单](docs/validation.md)
+[English](README.md) ·
+[AI 使用契约](plugins/mihomo-ai-failover/skills/openai-network-failover/SKILL.md) ·
+[Agent 接入](docs/agent-integration.md) · [架构](docs/architecture.md) ·
+[验收清单](docs/validation.md)
+
+> **AI Agent 在调用任何 MCP 工具前，必须先完整读取
+> [`openai-network-failover` Skill](plugins/mihomo-ai-failover/skills/openai-network-failover/SKILL.md)。**
+> 这是面向模型的权威使用契约，定义了适用环境、安全边界、工具顺序、停止条件
+> 和结果输出要求；不能只根据本 README 自行操作。
 
 ## 它解决什么
 
@@ -114,6 +121,10 @@ claude plugin install mihomo-ai-failover@mihomo-ai-failover
 Codex 和 Claude 共用同一套安全工作流与 14 个 MCP 工具。写工具默认禁用；
 即使启用，也必须提供服务器在代码中校验的精确确认词。详见
 [Agent 接入说明](docs/agent-integration.md)。
+
+不原生支持插件、但支持本地 stdio MCP 的 Agent，也可以加载同一份
+`SKILL.md` 作为操作指令，再按 Agent 接入说明配置 MCP。Skill 本身不会让
+云端模型获得本机权限；实际操作仍必须经过受信任的本地 MCP 客户端。
 
 ## 常用命令
 

@@ -7,9 +7,17 @@ failures against the same OpenAI target.
 > Version `0.1.0` is an early public preview for macOS, Clash Verge Rev, and
 > Mihomo. It keeps the macOS system proxy and never enables TUN automatically.
 
-[中文说明](README.zh-CN.md) · [Architecture](docs/architecture.md) ·
+[中文说明](README.zh-CN.md) ·
+[AI agent contract](plugins/mihomo-ai-failover/skills/openai-network-failover/SKILL.md) ·
 [Agent integration](docs/agent-integration.md) ·
+[Architecture](docs/architecture.md) ·
 [Validation](docs/validation.md)
+
+> **AI agents: read the
+> [`openai-network-failover` skill](plugins/mihomo-ai-failover/skills/openai-network-failover/SKILL.md)
+> before using any MCP tool.** It is the canonical machine-facing contract for
+> supported environments, safety boundaries, tool order, stop conditions, and
+> result reporting. This README is not a substitute for that contract.
 
 ## Why
 
@@ -85,6 +93,11 @@ claude plugin install mihomo-ai-failover@mihomo-ai-failover
 Both plugins bundle the same `openai-network-failover` skill and local MCP
 server. MCP mutations are disabled by default and require both local opt-in and
 an exact server-enforced confirmation.
+
+Agents without native plugin support can use the generic stdio MCP definition
+and load the same `SKILL.md` as instructions. The skill does not grant access to
+the Mac: the agent still needs a trusted local MCP client. See
+[Agent integration](docs/agent-integration.md).
 
 ## Roll back
 

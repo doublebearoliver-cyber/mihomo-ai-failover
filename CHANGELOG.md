@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented here.
 
+## [Unreleased]
+
+### Changed
+
+- Made the shared Agent Skill the canonical machine-facing usage contract.
+- Added explicit agent discovery, environment limits, tool selection, mutation
+  consent, stop conditions, and privacy-safe reporting guidance.
+- Added contract tests covering every MCP tool and confirmation guard.
+
 ## [0.1.0] - 2026-07-31
 
 ### Added
