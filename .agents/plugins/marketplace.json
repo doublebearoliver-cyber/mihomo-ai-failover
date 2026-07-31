@@ -1,0 +1,23 @@
+{
+  "name": "mihomo-ai-failover",
+  "interface": {
+    "displayName": "Mihomo AI Failover"
+  },
+  "plugins": [
+    {
+      "name": "mihomo-ai-failover",
+      "source": {
+        "source": "local",
+        "path": "./plugins/mihomo-ai-failover"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL",
+        "products": [
+          "CODEX"
+        ]
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}

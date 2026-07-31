@@ -1,0 +1,46 @@
+#!/bin/sh
+set -eu
+
+if [ -n "${MIHOMO_AI_FAILOVER_MCP_BIN:-}" ]; then
+  exec "${MIHOMO_AI_FAILOVER_MCP_BIN}"
+fi
+
+for candidate in \
+  "${HOME}/.local/bin/mihomo-ai-failover-mcp" \
+  "/opt/homebrew/bin/mihomo-ai-failover-mcp" \
+  "/usr/local/bin/mihomo-ai-failover-mcp"
+do
+  if [ -x "${candidate}" ]; then
+    exec "${candidate}"
+  fi
+done
+
+if command -v mihomo-ai-failover-mcp >/dev/null 2>&1; then
+  exec mihomo-ai-failover-mcp
+fi
+
+uv_binary=""
+for candidate in \
+  "${HOME}/.local/bin/uv" \
+  "/opt/homebrew/bin/uv" \
+  "/usr/local/bin/uv"
+do
+  if [ -x "${candidate}" ]; then
+    uv_binary="${candidate}"
+    break
+  fi
+done
+
+if [ -z "${uv_binary}" ] && command -v uv >/dev/null 2>&1; then
+  uv_binary="$(command -v uv)"
+fi
+
+if [ -z "${uv_binary}" ]; then
+  echo "mihomo-ai-failover requires uv: https://docs.astral.sh/uv/" >&2
+  exit 127
+fi
+
+exec "${uv_binary}" tool run \
+  --from "git+https://github.com/doublebearoliver-cyber/mihomo-ai-failover@v0.1.0" \
+  --with "mcp>=2,<3" \
+  mihomo-ai-failover-mcp

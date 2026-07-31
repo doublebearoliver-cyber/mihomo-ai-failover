@@ -1,0 +1,23 @@
+config_version: 1
+
+# Paths normally auto-discovered on macOS. Override only when Clash Verge uses
+# a non-standard location.
+clash_data_root: "~/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev"
+clash_config_path: "~/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev/clash-verge.yaml"
+clash_generated_config_path: "~/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev/clash-verge.yaml"
+clash_socket_path: /tmp/verge/verge-mihomo.sock
+mihomo_core_path: /Applications/Clash Verge.app/Contents/MacOS/verge-mihomo
+
+runtime_path: "~/Library/Application Support/Mihomo AI Failover"
+log_path: "~/Library/Logs/Mihomo AI Failover/monitor.jsonl"
+mixed_proxy_url: http://127.0.0.1:7897
+group_name: "🤖 AI稳定出口"
+
+monitor_interval_seconds: 10
+failure_rounds_before_switch: 2
+switch_connection_wait_seconds: 3
+cooldown_first_seconds: 300
+recovery_successes_required: 3
+
+# Mutation-capable MCP tools remain disabled until the local operator opts in.
+mcp_allow_mutations: false

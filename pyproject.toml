@@ -1,0 +1,72 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "mihomo-ai-failover"
+version = "0.1.0"
+description = "OpenAI-aware failover for Mihomo, with CLI and MCP adapters"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Oliver" }]
+keywords = [
+  "mihomo",
+  "clash-verge",
+  "openai",
+  "chatgpt",
+  "codex",
+  "mcp",
+  "failover",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: MacOS X",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: MacOS",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: System :: Networking :: Monitoring",
+]
+dependencies = [
+  "PyYAML>=6.0.2,<7",
+]
+
+[project.optional-dependencies]
+mcp = ["mcp>=2.0,<3"]
+
+[dependency-groups]
+dev = [
+  "build>=1.2.2",
+  "mcp>=2.0,<3",
+  "pytest>=8.3",
+  "pytest-asyncio>=0.25",
+  "ruff>=0.11",
+]
+
+[project.urls]
+Homepage = "https://github.com/doublebearoliver-cyber/mihomo-ai-failover"
+Repository = "https://github.com/doublebearoliver-cyber/mihomo-ai-failover"
+Issues = "https://github.com/doublebearoliver-cyber/mihomo-ai-failover/issues"
+
+[project.scripts]
+mihomo-ai-failover = "mihomo_ai_failover.cli:main"
+mihomo-ai-failover-mcp = "mihomo_ai_failover.mcp_server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/mihomo_ai_failover"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+ignore = ["E501"]

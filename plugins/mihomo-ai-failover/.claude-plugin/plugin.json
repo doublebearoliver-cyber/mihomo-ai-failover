@@ -1,0 +1,22 @@
+{
+  "name": "mihomo-ai-failover",
+  "version": "0.1.0",
+  "description": "Diagnose and operate OpenAI-aware failover for Mihomo on macOS.",
+  "author": {
+    "name": "Oliver",
+    "url": "https://github.com/doublebearoliver-cyber"
+  },
+  "homepage": "https://github.com/doublebearoliver-cyber/mihomo-ai-failover",
+  "repository": "https://github.com/doublebearoliver-cyber/mihomo-ai-failover",
+  "license": "MIT",
+  "keywords": [
+    "mihomo",
+    "clash-verge",
+    "chatgpt",
+    "codex",
+    "failover",
+    "macos"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json"
+}

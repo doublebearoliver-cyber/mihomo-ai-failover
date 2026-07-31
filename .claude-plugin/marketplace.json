@@ -1,0 +1,21 @@
+{
+  "name": "mihomo-ai-failover",
+  "metadata": {
+    "description": "OpenAI-aware failover tools for Mihomo on macOS."
+  },
+  "owner": {
+    "name": "Oliver"
+  },
+  "plugins": [
+    {
+      "name": "mihomo-ai-failover",
+      "description": "Diagnose and operate OpenAI-aware failover for Mihomo on macOS.",
+      "author": {
+        "name": "Oliver"
+      },
+      "category": "development",
+      "source": "./plugins/mihomo-ai-failover",
+      "homepage": "https://github.com/doublebearoliver-cyber/mihomo-ai-failover"
+    }
+  ]
+}

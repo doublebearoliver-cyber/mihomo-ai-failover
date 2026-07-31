@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "mihomo-ai-failover": {
+      "command": "/bin/sh",
+      "args": [
+        "-c",
+        "exec /bin/sh \"${CLAUDE_PLUGIN_ROOT:-.}/bin/mihomo-ai-failover-mcp\""
+      ],
+      "cwd": "."
+    }
+  }
+}
