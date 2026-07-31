@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            python: "3.10"
+          - os: macos-latest
+            python: "3.12"
+          - os: ubuntu-latest
+            python: "3.13"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python }}
+          enable-cache: true
+      - name: Install
+        run: uv sync --all-extras --dev --python "${{ matrix.python }}"
+      - name: Lint
+        run: uv run --python "${{ matrix.python }}" ruff check .
+      - name: Format
+        run: uv run --python "${{ matrix.python }}" ruff format --check .
+      - name: Test
+        run: uv run --python "${{ matrix.python }}" pytest
+      - name: Scan sensitive data
+        run: uv run --python "${{ matrix.python }}" python scripts/scan_sensitive.py
+      - name: Build distributions
+        run: uv run --python "${{ matrix.python }}" python -m build
