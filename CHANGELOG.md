@@ -10,6 +10,9 @@ All notable changes to this project will be documented here.
 - Added explicit agent discovery, environment limits, tool selection, mutation
   consent, stop conditions, and privacy-safe reporting guidance.
 - Added contract tests covering every MCP tool and confirmation guard.
+- Added time-limited real-browser feedback keyed by observed exit fingerprint,
+  with rejected-exit exclusion, confirmed-exit preference, CLI/MCP mutation
+  guards, and automatic invalidation when the exit changes.
 
 ## [0.1.0] - 2026-07-31
 

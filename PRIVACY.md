@@ -41,6 +41,8 @@ Local state may contain:
 - proxy display names and protocols;
 - observed public exit IP, country, region, ASN, and organization;
 - health statistics, latency samples, cooldown timestamps, and switch history;
+- time-limited user-confirmed browser status, sanitized reason, and the exit
+  fingerprint to which that feedback applies;
 - sanitized error categories.
 
 Local state must not contain proxy server addresses, proxy passwords,

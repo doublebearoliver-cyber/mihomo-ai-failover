@@ -40,6 +40,12 @@ A silent or spinning Codex UI is only an auxiliary symptom. It never triggers
 a switch by itself. GitHub, Git, npm, Docker, and ordinary websites are outside
 the OpenAI failure trigger.
 
+When automated probes can see only a Cloudflare challenge, a user-confirmed
+real-browser result can be stored against the observed exit IP + ASN + country
+fingerprint. Confirmed results last seven days by default; rejected results
+exclude that exit for 24 hours. Feedback never triggers a switch by itself and
+automatically becomes inapplicable when the exit fingerprint changes.
+
 ## Install
 
 Install [`uv`](https://docs.astral.sh/uv/), then:
@@ -98,6 +104,22 @@ Agents without native plugin support can use the generic stdio MCP definition
 and load the same `SKILL.md` as instructions. The skill does not grant access to
 the Mac: the agent still needs a trusted local MCP client. See
 [Agent integration](docs/agent-integration.md).
+
+To record an explicitly verified browser result, stop the monitor first so the
+state lock is uncontended:
+
+```bash
+mihomo-ai-failover service-stop
+mihomo-ai-failover web-feedback \
+  --node 'local node display name' \
+  --status confirmed \
+  --reason browser_login_success \
+  --confirm RECORD_WEB_FEEDBACK
+mihomo-ai-failover service-start
+```
+
+Use `rejected` and `browser_login_failed` for a verified failure. The command
+refuses to record feedback without an observed exit fingerprint.
 
 ## Roll back
 

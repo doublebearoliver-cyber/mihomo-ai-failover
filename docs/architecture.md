@@ -49,6 +49,13 @@ ordered so `profiles.yaml` is written last.
    same target are required.
 7. A successful or soft-only round resets the hard-failure streak.
 
+Cloudflare challenges remain soft because command-line probes cannot prove the
+interactive browser outcome. An explicitly user-verified login result can be
+stored separately as browser feedback. It is bound to the observed exit IP,
+ASN, and country, expires after a configured TTL, and affects candidate
+eligibility/ranking only; it never increments a hard-failure streak or triggers
+a switch.
+
 At the default 10-second interval, candidate preflight, 3-second connection
 wait, and verification keep the modeled first-failure-to-switch upper bound at
 23 seconds for a passing first candidate.
@@ -68,6 +75,10 @@ the live AI group does not move during inventory work.
 Candidates are ranked by current preflight health, distinct exit IP, ASN
 diversity, success history, cooldown/recovery state, stability, and only then
 median latency. Duplicate exit IPs are removed from each attempt order.
+An unexpired rejected browser fingerprint is excluded from all three failover
+layers. A confirmed fingerprint is preferred among otherwise healthy,
+independent candidates. Changing the observed fingerprint immediately makes
+the old feedback inapplicable, so a dynamic exit can be evaluated again.
 
 ## Switching
 

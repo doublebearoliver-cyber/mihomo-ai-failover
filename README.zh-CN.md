@@ -26,6 +26,11 @@
 Codex 暂时没有输出、一次延迟升高、一次偶发失败和 Cloudflare
 浏览器挑战都不会单独触发切换。
 
+当自动探针只能看到 Cloudflare 挑战、但用户已经用真实浏览器验证登录结果时，
+可以把结果按“出口 IP + ASN + 地区”指纹限时记录：成功默认保留 7 天，失败
+默认排除 24 小时。反馈不会单独触发切换；出口指纹变化或有效期届满后会重新
+评估，避免按节点名称永久拉黑。
+
 ## 核心行为
 
 - 每 10 秒检查 OpenAI API、认证和 ChatGPT 网页路径；
@@ -118,7 +123,7 @@ claude plugin marketplace add doublebearoliver-cyber/mihomo-ai-failover
 claude plugin install mihomo-ai-failover@mihomo-ai-failover
 ```
 
-Codex 和 Claude 共用同一套安全工作流与 14 个 MCP 工具。写工具默认禁用；
+Codex 和 Claude 共用同一套安全工作流与 15 个 MCP 工具。写工具默认禁用；
 即使启用，也必须提供服务器在代码中校验的精确确认词。详见
 [Agent 接入说明](docs/agent-integration.md)。
 
@@ -135,11 +140,28 @@ Codex 和 Claude 共用同一套安全工作流与 14 个 MCP 工具。写工具
 | `status` | 否 | 查看当前出口状态、监控状态和三层池数量 |
 | `profile-preview` | 否 | 预览持久化 Groups/Rules 修改 |
 | `inventory` | 仅本地状态 | 建立或刷新独立出口清单 |
+| `web-feedback` | 仅本地状态 | 记录限时、按出口指纹绑定的真实浏览器结果；不会切换节点 |
 | `run-once` | 可能切换 | 执行一轮正式监控逻辑 |
 | `daemon` | 可能切换 | 长期运行监控 |
 | `service-start` / `service-stop` | 是 | 启停用户级 LaunchAgent |
 
 所有命令支持 `--config /绝对路径/config.yaml`。
+
+真实浏览器反馈是显式写操作。先停止监控，确认浏览器结果，再记录并重启：
+
+```bash
+mihomo-ai-failover service-stop
+mihomo-ai-failover web-feedback \
+  --node '节点显示名' \
+  --status confirmed \
+  --reason browser_login_success \
+  --confirm RECORD_WEB_FEEDBACK
+mihomo-ai-failover service-start
+```
+
+失败时把 `confirmed` 改成 `rejected`，原因可写
+`browser_login_failed`。没有已扫描的出口指纹时命令会拒绝写入；守护进程仍在
+运行时也会拒绝，避免并发覆盖状态。
 
 ## 持久性
 
@@ -167,9 +189,9 @@ symlink 逃逸、冲突规则和写入期间文件变化都会让安装安全停
 - LaunchAgent：
   `~/Library/LaunchAgents/io.github.doublebearoliver.mihomo-ai-failover.plist`
 
-状态和日志会包含本地节点显示名、观察到的出口 IP/地区/ASN、成功率和切换
-历史，但不会写入订阅地址、代理密码、节点服务器地址或控制器密钥。MCP
-默认隐藏节点名称，并且从不返回出口 IP。
+状态和日志会包含本地节点显示名、观察到的出口 IP/地区/ASN、限时浏览器
+反馈、成功率和切换历史，但不会写入订阅地址、代理密码、节点服务器地址或
+控制器密钥。MCP 默认隐藏节点名称，并且从不返回出口 IP。
 
 ## 一键回滚
 

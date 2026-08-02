@@ -154,6 +154,8 @@ def default_config(
         "warm_pool_min": 30,
         "warm_pool_max": 40,
         "deep_verification_ttl_seconds": 604800,
+        "web_feedback_confirmed_ttl_seconds": 604800,
+        "web_feedback_rejected_ttl_seconds": 86400,
         "candidate_preflight_url": "https://api.openai.com/v1/models",
         "candidate_preflight_expected_status": "401",
         "candidate_preflight_timeout_ms": 4000,
@@ -271,6 +273,12 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ConfigError("clash_socket_path_must_be_absolute")
     if not str(config.get("group_name") or ""):
         raise ConfigError("group_name_required")
+    for key in (
+        "web_feedback_confirmed_ttl_seconds",
+        "web_feedback_rejected_ttl_seconds",
+    ):
+        if int(config.get(key, 0)) <= 0:
+            raise ConfigError(f"{key}_must_be_positive")
 
 
 def write_config(

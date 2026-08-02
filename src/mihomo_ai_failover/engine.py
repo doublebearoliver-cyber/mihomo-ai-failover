@@ -48,6 +48,10 @@ DEFAULT_CONFIG = default_config_path()
 SCHEMA_VERSION = 2
 SCANNER_GROUP = "🔬 AI出口扫描"
 GROUP_TYPES = {"Selector", "URLTest", "Fallback", "LoadBalance", "Compatible"}
+WEB_FEEDBACK_CONFIRMED = "confirmed"
+WEB_FEEDBACK_REJECTED = "rejected"
+WEB_FEEDBACK_STATUSES = {WEB_FEEDBACK_CONFIRMED, WEB_FEEDBACK_REJECTED}
+WEB_FEEDBACK_CONFIRMATION = "RECORD_WEB_FEEDBACK"
 
 
 class ControllerError(RuntimeError):
@@ -579,6 +583,7 @@ def node_template(protocol: str = "unknown") -> dict[str, Any]:
         "needs_recovery": False,
         "recovery_successes": 0,
         "failure_events": [],
+        "web_feedback": None,
     }
 
 
@@ -683,6 +688,96 @@ def success_rate(entry: dict[str, Any]) -> float:
     successes = int(entry.get("successes", 0))
     failures = int(entry.get("failures", 0))
     return (successes + 1) / (successes + failures + 2)
+
+
+def exit_fingerprint(entry: dict[str, Any]) -> dict[str, str | None] | None:
+    """Return a normalized independent-exit identity, never a node-name identity."""
+    raw_ip = str(entry.get("exit_ip") or "").strip()
+    if not raw_ip:
+        return None
+    try:
+        normalized_ip = str(ipaddress.ip_address(raw_ip))
+    except ValueError:
+        normalized_ip = raw_ip.lower()
+    asn = str(entry.get("asn") or "").strip().upper() or None
+    country = str(entry.get("exit_country") or "").strip().upper() or None
+    return {
+        "exit_ip": normalized_ip,
+        "asn": asn,
+        "exit_country": country,
+    }
+
+
+def active_web_feedback(
+    entry: dict[str, Any],
+    timestamp: int,
+) -> dict[str, Any] | None:
+    """Return unexpired browser feedback only while the exit identity still matches."""
+    feedback = entry.get("web_feedback")
+    if not isinstance(feedback, dict):
+        return None
+    if feedback.get("status") not in WEB_FEEDBACK_STATUSES:
+        return None
+    try:
+        expires_at = int(feedback.get("expires_at", 0))
+    except (TypeError, ValueError):
+        return None
+    if expires_at <= timestamp:
+        return None
+    recorded = feedback.get("exit_fingerprint")
+    current_fingerprint = exit_fingerprint(entry)
+    if not isinstance(recorded, dict) or current_fingerprint is None:
+        return None
+    if exit_fingerprint(recorded) != current_fingerprint:
+        return None
+    return feedback
+
+
+def web_feedback_status(entry: dict[str, Any], timestamp: int) -> str:
+    feedback = active_web_feedback(entry, timestamp)
+    return str(feedback["status"]) if feedback else "unknown"
+
+
+def record_web_feedback(
+    state: dict[str, Any],
+    node: str,
+    status: str,
+    timestamp: int,
+    ttl_seconds: int,
+    reason: str,
+) -> dict[str, Any]:
+    """Attach browser evidence to every node sharing the observed exit fingerprint."""
+    if status not in WEB_FEEDBACK_STATUSES:
+        raise ValueError("invalid_web_feedback_status")
+    if ttl_seconds <= 0:
+        raise ValueError("web_feedback_ttl_must_be_positive")
+    if node not in state.get("nodes", {}):
+        raise ValueError("web_feedback_node_not_found")
+    source = ensure_node(state, node)
+    fingerprint = exit_fingerprint(source)
+    if fingerprint is None:
+        raise ValueError("web_feedback_exit_fingerprint_required")
+
+    expires_at = timestamp + ttl_seconds
+    feedback = {
+        "status": status,
+        "observed_at": timestamp,
+        "expires_at": expires_at,
+        "exit_fingerprint": fingerprint,
+        "reason": clean_text(reason or "manual_browser_validation", 120),
+    }
+    affected_nodes: list[str] = []
+    for candidate, entry in state["nodes"].items():
+        if exit_fingerprint(entry) != fingerprint:
+            continue
+        entry["web_feedback"] = dict(feedback)
+        affected_nodes.append(candidate)
+    return {
+        "status": status,
+        "observed_at": timestamp,
+        "expires_at": expires_at,
+        "affected_nodes": affected_nodes,
+    }
 
 
 def update_route_observation(
@@ -807,9 +902,20 @@ def catalog_from_state(state: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def node_rank(entry: dict[str, Any], name: str) -> tuple[Any, ...]:
+def node_rank(
+    entry: dict[str, Any],
+    name: str,
+    timestamp: int | None = None,
+) -> tuple[Any, ...]:
+    checked_at = now_ts() if timestamp is None else timestamp
+    feedback_status = web_feedback_status(entry, checked_at)
     return (
         0 if entry.get("openai_status") == "healthy" else 1,
+        0
+        if feedback_status == WEB_FEEDBACK_CONFIRMED
+        else 2
+        if feedback_status == WEB_FEEDBACK_REJECTED
+        else 1,
         -success_rate(entry),
         -min(1000, int(entry.get("successes", 0)) + int(entry.get("failures", 0))),
         -int(entry.get("last_success_at", 0)),
@@ -819,6 +925,8 @@ def node_rank(entry: dict[str, Any], name: str) -> tuple[Any, ...]:
 
 
 def pool_eligible(entry: dict[str, Any], config: dict[str, Any], timestamp: int) -> bool:
+    if web_feedback_status(entry, timestamp) == WEB_FEEDBACK_REJECTED:
+        return False
     if entry.get("openai_status") not in {"healthy", "degraded"}:
         return False
     if not entry.get("exit_ip"):
@@ -847,13 +955,13 @@ def rebuild_pools(
         exit_ip = str(entry["exit_ip"])
         duplicate_counts[exit_ip] = duplicate_counts.get(exit_ip, 0) + 1
         previous = representatives.get(exit_ip)
-        if previous is None or node_rank(entry, name) < node_rank(
-            state["nodes"][previous], previous
+        if previous is None or node_rank(entry, name, timestamp) < node_rank(
+            state["nodes"][previous], previous, timestamp
         ):
             representatives[exit_ip] = name
 
     candidates = list(representatives.values())
-    candidates.sort(key=lambda name: node_rank(state["nodes"][name], name))
+    candidates.sort(key=lambda name: node_rank(state["nodes"][name], name, timestamp))
     active_max = int(config["active_pool_max"])
     active: list[str] = []
     used_asn: set[str] = set()
@@ -872,7 +980,7 @@ def rebuild_pools(
             key=lambda name: (
                 1 if str(state["nodes"][name].get("asn") or "") in used_asn else 0,
                 1 if str(state["nodes"][name].get("exit_country") or "") in used_country else 0,
-                node_rank(state["nodes"][name], name),
+                node_rank(state["nodes"][name], name, timestamp),
             ),
         )
         remaining.remove(selected)
@@ -1180,7 +1288,9 @@ def candidate_order(
     state: dict[str, Any],
     candidates: Sequence[str],
     current: str,
+    timestamp: int | None = None,
 ) -> list[str]:
+    checked_at = now_ts() if timestamp is None else timestamp
     current_entry = state["nodes"].get(current, {})
     current_ip = str(current_entry.get("exit_ip") or "")
     current_asn = str(current_entry.get("asn") or "")
@@ -1191,10 +1301,15 @@ def candidate_order(
             0 if entry.get("preflight_ok") else 1,
             0 if str(entry.get("exit_ip") or "") != current_ip else 1,
             0 if str(entry.get("asn") or "") != current_asn else 1,
-            node_rank(entry, name),
+            node_rank(entry, name, checked_at),
         )
 
-    ordered = sorted(set(candidates), key=key)
+    eligible = {
+        name
+        for name in candidates
+        if web_feedback_status(state["nodes"].get(name, {}), checked_at) != WEB_FEEDBACK_REJECTED
+    }
+    ordered = sorted(eligible, key=key)
     result: list[str] = []
     seen_exit_ips = set()
     for name in ordered:
@@ -1256,6 +1371,8 @@ def failover(
                 for node in layer_nodes
                 if node != old_node
                 and int(state["nodes"].get(node, {}).get("cooldown_until", 0)) <= timestamp
+                and web_feedback_status(state["nodes"].get(node, {}), timestamp)
+                != WEB_FEEDBACK_REJECTED
             ],
         )
         for layer_name, layer_nodes in layers
@@ -1282,7 +1399,7 @@ def failover(
                 config,
             )
         passing = [item["node"] for item in preflight if item["ok"]]
-        ordered = candidate_order(state, passing, old_node)
+        ordered = candidate_order(state, passing, old_node, timestamp)
         if ordered:
             selected_layers.append(layer_name)
         if len(ordered) > remaining_attempts:
@@ -1725,6 +1842,7 @@ def command_status(config: dict[str, Any], state: dict[str, Any]) -> tuple[int, 
             "country": current_entry.get("exit_country"),
             "asn": current_entry.get("asn"),
             "status": current_entry.get("openai_status", "unknown"),
+            "web_feedback": web_feedback_status(current_entry, now_ts()),
         },
         "monitor": state["monitor"],
         "pools": {
@@ -1756,6 +1874,58 @@ def command_check(config: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         "direct": direct,
         "current": current,
         "route": public_route_result(result),
+    }
+
+
+def command_web_feedback(
+    config: dict[str, Any],
+    state: dict[str, Any],
+    state_path: Path,
+    log_path: Path,
+    node: str,
+    status: str,
+    reason: str,
+    ttl_seconds: int | None = None,
+) -> tuple[int, dict[str, Any]]:
+    timestamp = now_ts()
+    ttl_key = (
+        "web_feedback_confirmed_ttl_seconds"
+        if status == WEB_FEEDBACK_CONFIRMED
+        else "web_feedback_rejected_ttl_seconds"
+    )
+    ttl = int(config[ttl_key]) if ttl_seconds is None else int(ttl_seconds)
+    result = record_web_feedback(
+        state,
+        node,
+        status,
+        timestamp,
+        ttl,
+        reason,
+    )
+    catalog = catalog_from_state(state)
+    rebuild_pools(
+        state,
+        catalog,
+        config,
+        timestamp,
+        state["monitor"].get("last_seen_node"),
+    )
+    atomic_write_json(state_path, state)
+    log_event(
+        log_path,
+        "web_feedback_recorded",
+        node=node,
+        status=status,
+        reason=clean_text(reason, 120),
+        expires_at=result["expires_at"],
+        affected_nodes=len(result["affected_nodes"]),
+    )
+    return 0, {
+        "status": "recorded",
+        "node": node,
+        "web_feedback": status,
+        "expires_at": result["expires_at"],
+        "affected_nodes": len(result["affected_nodes"]),
     }
 
 
@@ -1937,11 +2107,17 @@ def build_parser() -> argparse.ArgumentParser:
             "status",
             "check",
             "inventory",
+            "web-feedback",
         ),
         nargs="?",
         default="status",
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--node")
+    parser.add_argument("--web-status", choices=tuple(sorted(WEB_FEEDBACK_STATUSES)))
+    parser.add_argument("--reason", default="manual_browser_validation")
+    parser.add_argument("--ttl-seconds", type=int)
+    parser.add_argument("--confirm", default="")
     return parser
 
 
@@ -1971,9 +2147,36 @@ def main(argv: list[str] | None = None) -> int:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             print_output({"status": "already_running"})
-            return 0
+            return 2 if args.command == "web-feedback" else 0
 
-        if args.command == "inventory":
+        if args.command == "web-feedback":
+            if args.confirm != WEB_FEEDBACK_CONFIRMATION:
+                print_output(
+                    {
+                        "status": "confirmation_required",
+                        "confirmation": WEB_FEEDBACK_CONFIRMATION,
+                    }
+                )
+                return 2
+            if not args.node or not args.web_status:
+                print_output({"status": "node_and_web_status_required"})
+                return 2
+            try:
+                code, output = command_web_feedback(
+                    config,
+                    state,
+                    state_path,
+                    log_path,
+                    args.node,
+                    args.web_status,
+                    args.reason,
+                    args.ttl_seconds,
+                )
+            except ValueError as exc:
+                code, output = 2, {"status": str(exc)}
+            print_output(output)
+            return code
+        elif args.command == "inventory":
             try:
                 code, output = command_inventory(config, state, state_path, log_path)
             except (ControllerError, ScannerError, OSError, yaml.YAMLError) as exc:

@@ -19,5 +19,9 @@ switch_connection_wait_seconds: 3
 cooldown_first_seconds: 300
 recovery_successes_required: 3
 
+# Real-browser feedback is time-limited and bound to exit IP + ASN + country.
+web_feedback_confirmed_ttl_seconds: 604800
+web_feedback_rejected_ttl_seconds: 86400
+
 # Mutation-capable MCP tools remain disabled until the local operator opts in.
 mcp_allow_mutations: false

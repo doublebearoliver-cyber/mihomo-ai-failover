@@ -64,7 +64,8 @@ operation.
 | Inspect pool coverage | `list_pools` |
 | Test failover invariants without live changes | `simulate_failover` |
 | Preview installation | `preview_install` |
-| Perform one authorized local action | `initialize_config`, `install_failover`, `start_monitor`, `stop_monitor`, `rollback_profile`, or `uninstall_monitor` |
+| Record a user-verified real-browser result | `stop_monitor`, then `record_web_feedback`, then `start_monitor` |
+| Perform one authorized local action | `initialize_config`, `install_failover`, `start_monitor`, `stop_monitor`, `record_web_feedback`, `rollback_profile`, or `uninstall_monitor` |
 
 Read-only tools are the default. `run_health_check` performs network requests
 but never switches nodes. `simulate_failover` is isolated and never touches the
@@ -100,6 +101,14 @@ Treat these as soft or auxiliary evidence:
 - a Cloudflare browser challenge;
 - failure of GitHub, Git, npm, Docker, or an ordinary website.
 
+An explicit user report that ChatGPT login succeeded or failed in the real
+browser may be recorded with `record_web_feedback`, but never infer that result
+from an automated Cloudflare challenge, a timeout in a browser-control tool, or
+Codex behavior. Browser feedback is time-limited, bound to the observed exit
+IP + ASN + country fingerprint, and never triggers a switch by itself. Stop the
+monitor before recording it, then restart the monitor and return to read-only
+verification.
+
 Do not combine unrelated targets into a fake consecutive-failure sequence.
 Do not claim that a node should switch from one `run_health_check` snapshot.
 
@@ -131,6 +140,7 @@ Use these tools only for the action the user approved:
 - `install_failover`
 - `start_monitor`
 - `stop_monitor`
+- `record_web_feedback`
 - `rollback_profile`
 - `uninstall_monitor`
 

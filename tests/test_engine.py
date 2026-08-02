@@ -257,6 +257,126 @@ class PoolTests(unittest.TestCase):
             )
         self.assertFalse(entry["needs_recovery"])
 
+    def test_web_feedback_applies_to_shared_exit_and_expires(self):
+        state = WATCHDOG.default_state()
+        state["nodes"] = {
+            "节点A": self.make_entry("192.0.2.1", "AS1", "US"),
+            "节点A重复": self.make_entry("192.0.2.1", "as1", "us"),
+            "节点B": self.make_entry("198.51.100.2", "AS2", "JP"),
+        }
+        result = WATCHDOG.record_web_feedback(
+            state,
+            "节点A",
+            WATCHDOG.WEB_FEEDBACK_REJECTED,
+            1_000,
+            100,
+            "browser_login_failed",
+        )
+        self.assertEqual(set(result["affected_nodes"]), {"节点A", "节点A重复"})
+        self.assertEqual(
+            WATCHDOG.web_feedback_status(state["nodes"]["节点A重复"], 1_050),
+            WATCHDOG.WEB_FEEDBACK_REJECTED,
+        )
+        self.assertEqual(
+            WATCHDOG.web_feedback_status(state["nodes"]["节点B"], 1_050),
+            "unknown",
+        )
+        self.assertEqual(
+            WATCHDOG.web_feedback_status(state["nodes"]["节点A"], 1_100),
+            "unknown",
+        )
+
+    def test_web_feedback_invalidates_when_exit_fingerprint_changes(self):
+        state = WATCHDOG.default_state()
+        state["nodes"] = {
+            "动态出口": self.make_entry("192.0.2.1", "AS1", "US"),
+        }
+        WATCHDOG.record_web_feedback(
+            state,
+            "动态出口",
+            WATCHDOG.WEB_FEEDBACK_REJECTED,
+            1_000,
+            10_000,
+            "browser_login_failed",
+        )
+        state["nodes"]["动态出口"]["exit_ip"] = "198.51.100.2"
+        self.assertEqual(
+            WATCHDOG.web_feedback_status(state["nodes"]["动态出口"], 1_050),
+            "unknown",
+        )
+
+    def test_rejected_exit_is_not_a_pool_or_failover_candidate(self):
+        config = load_settings()
+        config["deep_verification_ttl_seconds"] = 20_000
+        state = WATCHDOG.default_state()
+        state["nodes"] = {
+            "当前": self.make_entry("192.0.2.1", "AS1", "US"),
+            "网页失败": self.make_entry("198.51.100.2", "AS2", "JP"),
+            "未知": self.make_entry("203.0.113.3", "AS3", "SG"),
+        }
+        WATCHDOG.record_web_feedback(
+            state,
+            "网页失败",
+            WATCHDOG.WEB_FEEDBACK_REJECTED,
+            10_500,
+            1_000,
+            "browser_login_failed",
+        )
+        catalog = {name: "ss" for name in state["nodes"]}
+        WATCHDOG.rebuild_pools(state, catalog, config, 11_000, current="当前")
+        self.assertNotIn("网页失败", state["pools"]["active"])
+        self.assertNotIn("网页失败", state["pools"]["warm"])
+        ordered = WATCHDOG.candidate_order(
+            state,
+            ["网页失败", "未知"],
+            "当前",
+            11_000,
+        )
+        self.assertEqual(ordered, ["未知"])
+
+    def test_confirmed_browser_exit_is_preferred_over_unknown(self):
+        state = WATCHDOG.default_state()
+        state["nodes"] = {
+            "当前": self.make_entry("192.0.2.1", "AS1", "US"),
+            "未知": self.make_entry("198.51.100.2", "AS2", "JP"),
+            "已确认": self.make_entry("203.0.113.3", "AS3", "SG"),
+        }
+        for name in ("未知", "已确认"):
+            state["nodes"][name]["preflight_ok"] = True
+        WATCHDOG.record_web_feedback(
+            state,
+            "已确认",
+            WATCHDOG.WEB_FEEDBACK_CONFIRMED,
+            1_000,
+            10_000,
+            "browser_login_success",
+        )
+        ordered = WATCHDOG.candidate_order(
+            state,
+            ["未知", "已确认"],
+            "当前",
+            1_050,
+        )
+        self.assertEqual(ordered[0], "已确认")
+
+    def test_confirmed_browser_feedback_does_not_bypass_network_quarantine(self):
+        config = load_settings()
+        config["deep_verification_ttl_seconds"] = 20_000
+        state = WATCHDOG.default_state()
+        entry = self.make_entry("203.0.113.3", "AS3", "SG")
+        entry["cooldown_until"] = 2_000
+        entry["needs_recovery"] = True
+        state["nodes"] = {"冷却节点": entry}
+        WATCHDOG.record_web_feedback(
+            state,
+            "冷却节点",
+            WATCHDOG.WEB_FEEDBACK_CONFIRMED,
+            1_000,
+            10_000,
+            "browser_login_success",
+        )
+        self.assertFalse(WATCHDOG.pool_eligible(entry, config, 1_050))
+
 
 class SwitchingGuardTests(unittest.TestCase):
     @staticmethod

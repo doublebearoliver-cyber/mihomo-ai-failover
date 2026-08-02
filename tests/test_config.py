@@ -35,6 +35,8 @@ def test_default_config_discovers_runtime_port_and_socket(tmp_path: Path) -> Non
     assert config["clash_socket_path"] == "/tmp/example/verge.sock"
     assert "secret" not in config
     assert "password" not in config
+    assert config["web_feedback_confirmed_ttl_seconds"] == 604800
+    assert config["web_feedback_rejected_ttl_seconds"] == 86400
 
 
 def test_config_round_trip_expands_home_without_secrets(tmp_path: Path) -> None:
@@ -67,4 +69,11 @@ def test_config_requires_two_failure_rounds() -> None:
     config = default_config(home=Path("/tmp/mihomo-ai-failover-test"))
     config["failure_rounds_before_switch"] = 1
     with pytest.raises(ConfigError, match="at_least_2"):
+        validate_config(config)
+
+
+def test_config_requires_positive_web_feedback_ttl() -> None:
+    config = default_config(home=Path("/tmp/mihomo-ai-failover-test"))
+    config["web_feedback_rejected_ttl_seconds"] = 0
+    with pytest.raises(ConfigError, match="web_feedback_rejected_ttl_seconds"):
         validate_config(config)

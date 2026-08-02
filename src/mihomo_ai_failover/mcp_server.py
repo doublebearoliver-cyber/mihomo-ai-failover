@@ -6,6 +6,7 @@ mutating tools require both a local opt-in and an exact confirmation phrase.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -32,6 +33,7 @@ MUTATION_ENV = "MIHOMO_AI_FAILOVER_MCP_MUTATIONS"
 CONFIG_WRITE_CONFIRMATION = "WRITE_LOCAL_CONFIG"
 SERVICE_START_CONFIRMATION = "START_LAUNCH_AGENT"
 SERVICE_STOP_CONFIRMATION = "STOP_LAUNCH_AGENT"
+WEB_FEEDBACK_CONFIRMATION = engine.WEB_FEEDBACK_CONFIRMATION
 
 
 class MCPPolicyError(RuntimeError):
@@ -395,6 +397,47 @@ def create_server() -> Any:
         _require_mutation(config, confirmation, CONFIG_WRITE_CONFIRMATION)
         target = write_config(path, config)
         return {"created": True, "config": str(target)}
+
+    @server.tool(
+        title="Record real-browser OpenAI web feedback",
+        description=(
+            "Record time-limited ChatGPT browser login evidence for the node's "
+            "current observed exit fingerprint. status must be confirmed or "
+            "rejected. This never switches a proxy and requires the monitor to "
+            "be stopped, mutation opt-in, and "
+            f"confirmation={WEB_FEEDBACK_CONFIRMATION}."
+        ),
+        annotations=write_local,
+    )
+    def record_web_feedback(
+        node: str,
+        status: str,
+        reason: str,
+        config_path: str | None = None,
+        ttl_seconds: int | None = None,
+        confirmation: str = "",
+    ) -> dict[str, Any]:
+        _, config = _load(config_path)
+        _require_mutation(config, confirmation, WEB_FEEDBACK_CONFIRMATION)
+        state_path, lock_path, log_path = engine.ensure_runtime(config)
+        with lock_path.open("a+", encoding="utf-8") as lock:
+            try:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as exc:
+                raise MCPPolicyError("monitor_must_be_stopped") from exc
+            state = engine.load_state(state_path)
+            _, result = engine.command_web_feedback(
+                config,
+                state,
+                state_path,
+                log_path,
+                node,
+                status,
+                reason,
+                ttl_seconds,
+            )
+        result.pop("node", None)
+        return {"ok": True, **result}
 
     @server.tool(
         title="Install local failover",
