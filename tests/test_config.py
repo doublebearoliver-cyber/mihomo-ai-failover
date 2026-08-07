@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -37,6 +38,7 @@ def test_default_config_discovers_runtime_port_and_socket(tmp_path: Path) -> Non
     assert "password" not in config
     assert config["web_feedback_confirmed_ttl_seconds"] == 604800
     assert config["web_feedback_rejected_ttl_seconds"] == 86400
+    assert config["candidate_reverification_delay_seconds"] == 3
 
 
 def test_config_round_trip_expands_home_without_secrets(tmp_path: Path) -> None:
@@ -77,3 +79,43 @@ def test_config_requires_positive_web_feedback_ttl() -> None:
     config["web_feedback_rejected_ttl_seconds"] = 0
     with pytest.raises(ConfigError, match="web_feedback_rejected_ttl_seconds"):
         validate_config(config)
+
+
+def test_config_rejects_negative_hard_probe_retries() -> None:
+    config = default_config(home=Path("/tmp/mihomo-ai-failover-test"))
+    config["hard_probe_retry_count"] = -1
+    with pytest.raises(ConfigError, match="hard_probe_retry_count"):
+        validate_config(config)
+
+
+def test_config_rejects_negative_candidate_reverification_delay() -> None:
+    config = default_config(home=Path("/tmp/mihomo-ai-failover-test"))
+    config["candidate_reverification_delay_seconds"] = -1
+    with pytest.raises(ConfigError, match="candidate_reverification_delay_seconds"):
+        validate_config(config)
+
+
+def test_old_config_is_upgraded_with_ws_probe(tmp_path: Path) -> None:
+    target = tmp_path / "config.json"
+    target.write_text(
+        json.dumps(
+            {
+                "config_version": 1,
+                "active_probes": [
+                    {
+                        "name": "openai_api",
+                        "kind": "openai_api",
+                        "url": "https://api.openai.com/v1/models",
+                        "timeout_seconds": 6,
+                        "connect_timeout_seconds": 4,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    loaded = load_config(target, home=tmp_path)
+    names = {item["name"] for item in loaded["active_probes"]}
+    assert loaded["config_version"] == 2
+    assert "openai_api" in names
+    assert "chatgpt_ws" in names

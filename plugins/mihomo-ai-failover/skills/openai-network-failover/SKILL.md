@@ -90,8 +90,12 @@ Do not call an installation or service mutation during diagnosis.
 
 Hard-failure evidence includes a health-check-classified TCP/TLS failure,
 timeout, reset, or verified unavailable/region response. The daemon requires
-two consecutive hard failures against the same target and applies local-network
-and controller guards before evaluating a switch.
+two consecutive verified hard-failure rounds on the OpenAI route and applies
+local-network and controller guards before evaluating a switch. The failing
+critical target may differ between rounds. The first hard-failure round may
+start isolated candidate preparation, but it never switches the live group by
+itself. Within each round, a hard-failing target is retried once; a successful
+retry means that round does not count as hard for that target.
 
 Treat these as soft or auxiliary evidence:
 
@@ -109,7 +113,6 @@ IP + ASN + country fingerprint, and never triggers a switch by itself. Stop the
 monitor before recording it, then restart the monitor and return to read-only
 verification.
 
-Do not combine unrelated targets into a fake consecutive-failure sequence.
 Do not claim that a node should switch from one `run_health_check` snapshot.
 
 ## Inspect failover behavior
@@ -120,6 +123,12 @@ Do not claim that a node should switch from one `run_health_check` snapshot.
   different-exit preference without touching the live proxy.
 - Use `get_recent_events` to distinguish a hard failure, a soft anomaly, a
   successful switch, cooldown, and an all-unavailable backoff episode.
+- Treat a light delay result as preflight only. A switch candidate needs two
+  fresh full OpenAI-path samples, a just-in-time live-core preflight, live-route
+  verification before connection closure, and a post-switch probation period.
+  The deep evidence needs two usable samples with at least one retry-free result.
+  A retry-assisted live acceptance must pass a mandatory retry-free follow-up
+  after three seconds before a newly selected route can commit.
 
 ## Install or change the local monitor
 

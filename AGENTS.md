@@ -28,14 +28,17 @@
 
 - A healthy selected node stays selected. Latency differences alone never
   trigger a switch.
-- Switching requires two consecutive hard failures for the same verified
-  OpenAI target.
+- Switching requires two guarded aggregate hard-failure rounds on the verified
+  OpenAI route; the failing critical target may differ between rounds.
 - A local-network failure, stopped Mihomo process, or controller failure must
   not trigger blind switching.
 - Candidate ranking prioritizes current health, success history, a distinct
   exit IP, ASN diversity, cooldown state, and stability before latency.
-- After switching, close only stale OpenAI-related connections bound to the old
-  chain.
+- Deep candidate evidence needs two usable samples with at least one retry-free
+  result. A retry-assisted live acceptance must pass a mandatory retry-free
+  follow-up before a newly selected route can commit.
+- After switching, close only stale OpenAI-related connections whose chains do
+  not contain the newly selected node.
 - Notify "当前机场全部不可用" once per outage episode and use backoff.
 
 ## Code layout

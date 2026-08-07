@@ -20,7 +20,7 @@ CLASH_VERGE_APP_ID = "io.github.clash-verge-rev.clash-verge-rev"
 DEFAULT_GROUP_NAME = "🤖 AI稳定出口"
 DEFAULT_SOCKET_PATH = "/tmp/verge/verge-mihomo.sock"
 DEFAULT_CONFIG_FILENAME = "config.yaml"
-CONFIG_VERSION = 1
+CONFIG_VERSION = 2
 
 DEFAULT_AI_SUFFIXES = [
     "openai.com",
@@ -141,8 +141,12 @@ def default_config(
         ),
         "monitor_interval_seconds": 10,
         "failure_rounds_before_switch": 2,
+        "failure_confirmation_min_gap_seconds": 8,
+        "hard_probe_retry_count": 1,
+        "hard_probe_retry_delay_seconds": 1,
+        "parallel_failure_confirmation": True,
         "switch_connection_wait_seconds": 3,
-        "max_candidate_attempts_per_failover": 3,
+        "max_candidate_attempts_per_failover": 2,
         "candidate_retry_backoff_seconds": 30,
         "cooldown_first_seconds": 300,
         "cooldown_repeat_seconds": 900,
@@ -154,16 +158,35 @@ def default_config(
         "warm_pool_min": 30,
         "warm_pool_max": 40,
         "deep_verification_ttl_seconds": 604800,
+        "active_candidate_ttl_seconds": 1800,
+        "warm_candidate_ttl_seconds": 21600,
         "web_feedback_confirmed_ttl_seconds": 604800,
         "web_feedback_rejected_ttl_seconds": 86400,
         "candidate_preflight_url": "https://api.openai.com/v1/models",
         "candidate_preflight_expected_status": "401",
         "candidate_preflight_timeout_ms": 4000,
-        "candidate_concurrency": 20,
+        "candidate_commit_preflight_timeout_ms": 2000,
+        "candidate_reverification_delay_seconds": 3,
+        "candidate_concurrency": 8,
+        "candidate_prefilter_limit": 24,
+        "candidate_prefilter_batch_size": 8,
+        "candidate_prepare_count": 3,
+        "candidate_isolated_parallelism": 3,
+        "candidate_validation_samples_required": 2,
+        "candidate_validation_window_seconds": 120,
+        "candidate_validation_min_gap_seconds": 5,
+        "candidate_validation_fresh_seconds": 30,
+        "probation_seconds": 60,
         "active_preflight_interval_seconds": 10,
+        "active_preflight_batch_size": 4,
+        "active_full_scan_interval_seconds": 120,
+        "active_full_scan_batch_size": 2,
         "warm_scan_interval_seconds": 300,
+        "warm_scan_batch_size": 2,
+        "pool_refill_interval_seconds": 60,
+        "pool_refill_batch_size": 2,
         "cold_scan_interval_seconds": 21600,
-        "cold_scan_batch_size": 5,
+        "cold_scan_batch_size": 4,
         "catalog_refresh_interval_seconds": 300,
         "initial_deep_scan_max": 80,
         "geo_probe_url": "https://api.ip.sb/geoip",
@@ -207,6 +230,13 @@ def default_config(
                 "timeout_seconds": 6,
                 "connect_timeout_seconds": 4,
             },
+            {
+                "name": "chatgpt_ws",
+                "kind": "chatgpt_ws",
+                "url": "https://ws.chatgpt.com/",
+                "timeout_seconds": 6,
+                "connect_timeout_seconds": 4,
+            },
         ],
     }
 
@@ -221,9 +251,23 @@ def normalize_config(
     *,
     home: Path | None = None,
 ) -> dict[str, Any]:
-    config = default_config(home)
+    defaults = default_config(home)
+    config = dict(defaults)
     if raw:
         config.update(raw)
+        configured_probes = raw.get("active_probes")
+        if isinstance(configured_probes, list):
+            merged = list(configured_probes)
+            names = {
+                str(item.get("name"))
+                for item in merged
+                if isinstance(item, dict) and item.get("name")
+            }
+            merged.extend(
+                item for item in defaults["active_probes"] if str(item.get("name")) not in names
+            )
+            config["active_probes"] = merged
+    config["config_version"] = CONFIG_VERSION
     for key in PATH_KEYS:
         value = config.get(key)
         if isinstance(value, str):
@@ -259,6 +303,36 @@ def validate_config(config: dict[str, Any]) -> None:
     interval = float(config.get("monitor_interval_seconds", 0))
     if interval < 5:
         raise ConfigError("monitor_interval_seconds_must_be_at_least_5")
+    if int(config.get("failure_confirmation_min_gap_seconds", 0)) < 1:
+        raise ConfigError("failure_confirmation_min_gap_seconds_must_be_positive")
+    if int(config.get("hard_probe_retry_count", -1)) < 0:
+        raise ConfigError("hard_probe_retry_count_must_not_be_negative")
+    if float(config.get("hard_probe_retry_delay_seconds", -1)) < 0:
+        raise ConfigError("hard_probe_retry_delay_seconds_must_not_be_negative")
+    if int(config.get("candidate_prepare_count", 0)) < 1:
+        raise ConfigError("candidate_prepare_count_must_be_positive")
+    if int(config.get("candidate_prefilter_batch_size", 0)) < int(
+        config["candidate_prepare_count"]
+    ):
+        raise ConfigError("candidate_prefilter_batch_must_cover_prepare_count")
+    if int(config.get("candidate_isolated_parallelism", 0)) < 1:
+        raise ConfigError("candidate_isolated_parallelism_must_be_positive")
+    if int(config.get("active_preflight_batch_size", 0)) < 1:
+        raise ConfigError("active_preflight_batch_size_must_be_positive")
+    if int(config.get("candidate_commit_preflight_timeout_ms", 0)) < 500:
+        raise ConfigError("candidate_commit_preflight_timeout_ms_must_be_at_least_500")
+    if float(config.get("candidate_reverification_delay_seconds", -1)) < 0:
+        raise ConfigError("candidate_reverification_delay_seconds_must_not_be_negative")
+    if int(config.get("candidate_validation_samples_required", 0)) < 2:
+        raise ConfigError("candidate_validation_samples_required_must_be_at_least_2")
+    if int(config.get("candidate_validation_min_gap_seconds", 0)) < 1:
+        raise ConfigError("candidate_validation_min_gap_seconds_must_be_positive")
+    if int(config.get("active_candidate_ttl_seconds", 0)) <= 0:
+        raise ConfigError("active_candidate_ttl_seconds_must_be_positive")
+    if int(config.get("warm_candidate_ttl_seconds", 0)) < int(
+        config["active_candidate_ttl_seconds"]
+    ):
+        raise ConfigError("warm_candidate_ttl_seconds_must_cover_active_ttl")
     suffixes = config.get("ai_domain_suffixes")
     if not isinstance(suffixes, list) or not suffixes:
         raise ConfigError("ai_domain_suffixes_required")

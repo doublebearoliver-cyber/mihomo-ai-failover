@@ -76,7 +76,7 @@ on model instructions.
 
 | Signal | Agent interpretation |
 | --- | --- |
-| Same OpenAI target has two consecutive verified hard failures | The daemon may evaluate failover after local-network and controller guards |
+| Two consecutive verified hard-failure rounds on the OpenAI route | The daemon may evaluate failover after the per-round hard-target retry plus local-network and controller guards; the failing critical target may differ between rounds |
 | TCP/TLS failure, timeout, reset, or verified unavailable/region response | Hard-failure evidence when classified by the health checker |
 | One failed probe, small latency change, or a slow response | Soft anomaly; observe, do not switch |
 | Codex spins or temporarily has no output | Auxiliary symptom only |
@@ -86,7 +86,8 @@ on model instructions.
 
 `run_health_check` is a snapshot and never switches nodes. Use sanitized recent
 events to understand a sequence; do not manufacture a two-failure sequence from
-one result.
+one result. The first verified hard-failure round may start isolated candidate
+preparation, but it does not authorize a live switch.
 
 ## Mutation policy
 

@@ -156,6 +156,8 @@ def _recent_events(
         "status",
         "error",
         "reasons",
+        "recovered_hard_targets",
+        "initial_recovered_hard_targets",
         "backoff_until",
         "notified",
     }
@@ -195,20 +197,38 @@ def _simulate_invariants() -> dict[str, Any]:
     )
     state["nodes"] = {"current": current, "candidate": candidate}
     ordered = engine.candidate_order(state, ["candidate"], "current")
-    first_failure_to_switch_upper_bound = (
-        int(config["monitor_interval_seconds"])
-        + int(config["candidate_preflight_timeout_ms"]) // 1000
+    candidate_commit_budget = (
+        int(config["candidate_commit_preflight_timeout_ms"]) / 1000
         + int(config["switch_connection_wait_seconds"])
         + max(int(item["timeout_seconds"]) for item in config["active_probes"])
+    )
+    first_candidate_upper_bound = (
+        int(config["failure_confirmation_min_gap_seconds"]) + candidate_commit_budget
+    )
+    second_candidate_upper_bound = first_candidate_upper_bound + candidate_commit_budget
+    probe_timeout = max(int(item["timeout_seconds"]) for item in config["active_probes"])
+    retry_assisted_additional = (
+        int(config["hard_probe_retry_delay_seconds"])
+        + probe_timeout
+        + int(config["candidate_reverification_delay_seconds"])
+        + probe_timeout
     )
     return {
         "passed": bool(
             config["failure_rounds_before_switch"] == 2
-            and first_failure_to_switch_upper_bound <= 30
+            and config["candidate_prepare_count"] == 3
+            and config["max_candidate_attempts_per_failover"] == 2
+            and second_candidate_upper_bound <= 30
             and ordered == ["candidate"]
         ),
         "failure_rounds_before_switch": config["failure_rounds_before_switch"],
-        "upper_bound_seconds": first_failure_to_switch_upper_bound,
+        "upper_bound_seconds": second_candidate_upper_bound,
+        "first_candidate_upper_bound_seconds": first_candidate_upper_bound,
+        "upper_bound_scope": "prepared_retry_free_candidate",
+        "retry_assisted_additional_upper_bound_seconds": retry_assisted_additional,
+        "prepared_candidate_target": config["candidate_prepare_count"],
+        "live_selection_budget": config["max_candidate_attempts_per_failover"],
+        "prevalidation_overlaps_confirmation": True,
         "different_exit_preferred": ordered == ["candidate"],
         "live_proxy_changed": False,
     }
