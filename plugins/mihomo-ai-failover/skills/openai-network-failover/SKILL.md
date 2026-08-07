@@ -64,7 +64,8 @@ operation.
 | Inspect pool coverage | `list_pools` |
 | Test failover invariants without live changes | `simulate_failover` |
 | Preview installation | `preview_install` |
-| Perform one authorized local action | `initialize_config`, `install_failover`, `start_monitor`, `stop_monitor`, `rollback_profile`, or `uninstall_monitor` |
+| Record a user-verified real-browser result | `stop_monitor`, then `record_web_feedback`, then `start_monitor` |
+| Perform one authorized local action | `initialize_config`, `install_failover`, `start_monitor`, `stop_monitor`, `record_web_feedback`, `rollback_profile`, or `uninstall_monitor` |
 
 Read-only tools are the default. `run_health_check` performs network requests
 but never switches nodes. `simulate_failover` is isolated and never touches the
@@ -89,8 +90,12 @@ Do not call an installation or service mutation during diagnosis.
 
 Hard-failure evidence includes a health-check-classified TCP/TLS failure,
 timeout, reset, or verified unavailable/region response. The daemon requires
-two consecutive hard failures against the same target and applies local-network
-and controller guards before evaluating a switch.
+two consecutive verified hard-failure rounds on the OpenAI route and applies
+local-network and controller guards before evaluating a switch. The failing
+critical target may differ between rounds. The first hard-failure round may
+start isolated candidate preparation, but it never switches the live group by
+itself. Within each round, a hard-failing target is retried once; a successful
+retry means that round does not count as hard for that target.
 
 Treat these as soft or auxiliary evidence:
 
@@ -100,7 +105,14 @@ Treat these as soft or auxiliary evidence:
 - a Cloudflare browser challenge;
 - failure of GitHub, Git, npm, Docker, or an ordinary website.
 
-Do not combine unrelated targets into a fake consecutive-failure sequence.
+An explicit user report that ChatGPT login succeeded or failed in the real
+browser may be recorded with `record_web_feedback`, but never infer that result
+from an automated Cloudflare challenge, a timeout in a browser-control tool, or
+Codex behavior. Browser feedback is time-limited, bound to the observed exit
+IP + ASN + country fingerprint, and never triggers a switch by itself. Stop the
+monitor before recording it, then restart the monitor and return to read-only
+verification.
+
 Do not claim that a node should switch from one `run_health_check` snapshot.
 
 ## Inspect failover behavior
@@ -111,6 +123,12 @@ Do not claim that a node should switch from one `run_health_check` snapshot.
   different-exit preference without touching the live proxy.
 - Use `get_recent_events` to distinguish a hard failure, a soft anomaly, a
   successful switch, cooldown, and an all-unavailable backoff episode.
+- Treat a light delay result as preflight only. A switch candidate needs two
+  fresh full OpenAI-path samples, a just-in-time live-core preflight, live-route
+  verification before connection closure, and a post-switch probation period.
+  The deep evidence needs two usable samples with at least one retry-free result.
+  A retry-assisted live acceptance must pass a mandatory retry-free follow-up
+  after three seconds before a newly selected route can commit.
 
 ## Install or change the local monitor
 
@@ -131,6 +149,7 @@ Use these tools only for the action the user approved:
 - `install_failover`
 - `start_monitor`
 - `stop_monitor`
+- `record_web_feedback`
 - `rollback_profile`
 - `uninstall_monitor`
 

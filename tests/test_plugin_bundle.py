@@ -115,7 +115,7 @@ def test_agent_contract_is_discoverable_and_covers_every_mcp_tool() -> None:
 def test_agent_contract_preserves_failover_and_privacy_boundaries() -> None:
     skill = SKILL.read_text(encoding="utf-8")
     required_phrases = (
-        "two consecutive hard failures against the same target",
+        "two consecutive verified hard-failure rounds on the OpenAI route",
         "Never enable TUN",
         "Never modify Mihomo's generated runtime YAML",
         "Do not call an installation or service mutation during diagnosis",

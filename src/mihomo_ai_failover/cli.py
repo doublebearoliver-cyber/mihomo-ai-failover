@@ -63,6 +63,21 @@ def build_parser() -> argparse.ArgumentParser:
     diagnose = subparsers.add_parser("diagnose", help="Inspect the local environment")
     _add_config_argument(diagnose)
 
+    web_feedback = subparsers.add_parser(
+        "web-feedback",
+        help="Record time-limited real-browser evidence for one observed exit",
+    )
+    _add_config_argument(web_feedback)
+    web_feedback.add_argument("--node", required=True)
+    web_feedback.add_argument(
+        "--status",
+        required=True,
+        choices=(engine.WEB_FEEDBACK_CONFIRMED, engine.WEB_FEEDBACK_REJECTED),
+    )
+    web_feedback.add_argument("--reason", default="manual_browser_validation")
+    web_feedback.add_argument("--ttl-seconds", type=int)
+    web_feedback.add_argument("--confirm", required=True)
+
     profile_preview = subparsers.add_parser(
         "profile-preview",
         help="Preview persistent Clash Verge group/rule integration",
@@ -136,6 +151,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     command = args.command
     if command in CORE_COMMANDS:
         return engine.main([command, "--config", str(args.config)])
+    if command == "web-feedback":
+        forwarded = [
+            command,
+            "--config",
+            str(args.config),
+            "--node",
+            args.node,
+            "--web-status",
+            args.status,
+            "--reason",
+            args.reason,
+            "--confirm",
+            args.confirm,
+        ]
+        if args.ttl_seconds is not None:
+            forwarded.extend(("--ttl-seconds", str(args.ttl_seconds)))
+        return engine.main(forwarded)
 
     try:
         if command == "init":

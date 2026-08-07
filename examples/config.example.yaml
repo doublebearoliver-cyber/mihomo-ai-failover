@@ -1,4 +1,4 @@
-config_version: 1
+config_version: 2
 
 # Paths normally auto-discovered on macOS. Override only when Clash Verge uses
 # a non-standard location.
@@ -15,9 +15,40 @@ group_name: "🤖 AI稳定出口"
 
 monitor_interval_seconds: 10
 failure_rounds_before_switch: 2
+failure_confirmation_min_gap_seconds: 8
+hard_probe_retry_count: 1
+hard_probe_retry_delay_seconds: 1
+parallel_failure_confirmation: true
 switch_connection_wait_seconds: 3
 cooldown_first_seconds: 300
 recovery_successes_required: 3
+
+# Candidates need two fresh full OpenAI-path samples before live selection.
+max_candidate_attempts_per_failover: 2
+candidate_prepare_count: 3
+candidate_isolated_parallelism: 3
+candidate_commit_preflight_timeout_ms: 2000
+candidate_reverification_delay_seconds: 3
+candidate_validation_samples_required: 2
+candidate_validation_window_seconds: 120
+candidate_validation_min_gap_seconds: 5
+candidate_validation_fresh_seconds: 30
+probation_seconds: 60
+
+# Bounded pool maintenance. Pool membership still depends on independent exits.
+active_preflight_batch_size: 4
+active_full_scan_interval_seconds: 120
+active_full_scan_batch_size: 2
+warm_scan_interval_seconds: 300
+warm_scan_batch_size: 2
+pool_refill_interval_seconds: 60
+pool_refill_batch_size: 2
+cold_scan_interval_seconds: 21600
+cold_scan_batch_size: 4
+
+# Real-browser feedback is time-limited and bound to exit IP + ASN + country.
+web_feedback_confirmed_ttl_seconds: 604800
+web_feedback_rejected_ttl_seconds: 86400
 
 # Mutation-capable MCP tools remain disabled until the local operator opts in.
 mcp_allow_mutations: false

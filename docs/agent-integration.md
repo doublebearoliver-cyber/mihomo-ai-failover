@@ -64,6 +64,7 @@ operate the user's Mac.
 | `install_failover` | Mutation, local | Back up and install profile integration |
 | `start_monitor` | Mutation, local | Start or restart the LaunchAgent |
 | `stop_monitor` | Mutation, local | Stop the LaunchAgent |
+| `record_web_feedback` | Mutation, local | Store time-limited, exit-bound real-browser evidence while the monitor is stopped |
 | `rollback_profile` | Destructive, local | Restore a profile integration backup |
 | `uninstall_monitor` | Destructive, local | Stop and remove the LaunchAgent plist |
 
@@ -75,16 +76,18 @@ on model instructions.
 
 | Signal | Agent interpretation |
 | --- | --- |
-| Same OpenAI target has two consecutive verified hard failures | The daemon may evaluate failover after local-network and controller guards |
+| Two consecutive verified hard-failure rounds on the OpenAI route | The daemon may evaluate failover after the per-round hard-target retry plus local-network and controller guards; the failing critical target may differ between rounds |
 | TCP/TLS failure, timeout, reset, or verified unavailable/region response | Hard-failure evidence when classified by the health checker |
 | One failed probe, small latency change, or a slow response | Soft anomaly; observe, do not switch |
 | Codex spins or temporarily has no output | Auxiliary symptom only |
 | Cloudflare browser challenge | Browser state, not healthy-path proof and not independent node-failure proof |
+| User explicitly verifies ChatGPT login success/failure in a real browser | May be recorded as time-limited exit-fingerprint feedback; never infer it from an automated challenge page |
 | GitHub, Git, npm, Docker, or an ordinary website fails | Outside the OpenAI failover trigger |
 
 `run_health_check` is a snapshot and never switches nodes. Use sanitized recent
 events to understand a sequence; do not manufacture a two-failure sequence from
-one result.
+one result. The first verified hard-failure round may start isolated candidate
+preparation, but it does not authorize a live switch.
 
 ## Mutation policy
 
@@ -100,6 +103,7 @@ Mutations require both:
 | `install_failover` | `INSTALL_MIHOMO_AI_FAILOVER` |
 | `start_monitor` | `START_LAUNCH_AGENT` |
 | `stop_monitor` | `STOP_LAUNCH_AGENT` |
+| `record_web_feedback` | `RECORD_WEB_FEEDBACK` |
 | `rollback_profile` | `ROLLBACK_PROFILE_INTEGRATION` |
 | `uninstall_monitor` | `UNINSTALL_LAUNCH_AGENT` |
 
@@ -118,6 +122,14 @@ The normal workflow is:
 6. enable local mutation policy;
 7. call one authorized mutation;
 8. diagnose again.
+
+For browser feedback, first establish the node and observed exit through
+read-only status/inventory evidence, obtain an explicit real-browser result
+from the user, stop the monitor, call `record_web_feedback`, and restart the
+monitor. The tool rejects missing exit fingerprints and never changes the live
+proxy selection. A rejected result expires by default after 24 hours; a
+confirmed result expires after seven days; a changed exit fingerprint
+invalidates either result immediately.
 
 Do not leave MCP mutations enabled when they are not needed.
 

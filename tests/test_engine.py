@@ -1,5 +1,6 @@
 import re
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -16,6 +17,8 @@ def healthy_route(latency=300):
     return {
         "classification": "healthy",
         "usable": True,
+        "candidate_eligible": True,
+        "recovered_hard_targets": [],
         "hard_reasons": [],
         "soft_reasons": [],
         "median_ms": latency,
@@ -43,6 +46,14 @@ class FakeController:
     def select(self, group, node):
         self.selections.append((group, node))
         self.current = node
+
+    def delay(self, node, url, timeout_ms, expected):
+        del node, url, timeout_ms, expected
+        return None
+
+    def close_stale_ai_connections(self, new_node, suffixes):
+        del new_node, suffixes
+        return 0
 
 
 class ProbeClassificationTests(unittest.TestCase):
@@ -86,6 +97,133 @@ class ProbeClassificationTests(unittest.TestCase):
         )
         self.assertEqual(verdict, "soft")
         self.assertEqual(reason, "cloudflare_challenge")
+
+    def test_chatgpt_ws_404_proves_transport(self):
+        verdict, reason = WATCHDOG.classify_probe(
+            "chatgpt_ws",
+            404,
+            {"server": "cloudflare"},
+            b"",
+            0,
+            "",
+        )
+        self.assertEqual((verdict, reason), ("healthy", "transport_http_404"))
+
+    def test_browser_challenge_is_separate_candidate_state(self):
+        config = load_settings()
+
+        def fake_probe(proxy_url, probe):
+            del proxy_url
+            values = {
+                "openai_api": ("healthy", "expected_401_json", 401),
+                "openai_auth": ("healthy", "expected_oidc_json", 200),
+                "chatgpt_web": ("soft", "cloudflare_challenge", 403),
+                "chatgpt_ws": ("healthy", "transport_http_404", 404),
+            }
+            verdict, reason, status = values[probe["name"]]
+            return {
+                "name": probe["name"],
+                "kind": probe["kind"],
+                "status": status,
+                "latency_ms": 100,
+                "verdict": verdict,
+                "reason": reason,
+            }
+
+        with mock.patch.object(WATCHDOG, "http_probe", side_effect=fake_probe):
+            result = WATCHDOG.route_probe("http://127.0.0.1:7897", config)
+        self.assertEqual(result["classification"], "browser_ambiguous")
+        self.assertEqual(result["recovered_hard_targets"], [])
+        self.assertTrue(result["candidate_eligible"])
+
+    def test_generic_soft_web_failure_is_not_a_candidate(self):
+        config = load_settings()
+
+        def fake_probe(proxy_url, probe):
+            del proxy_url
+            verdict = "soft" if probe["name"] == "chatgpt_web" else "healthy"
+            reason = "upstream_http_503" if probe["name"] == "chatgpt_web" else "expected_transport"
+            return {
+                "name": probe["name"],
+                "kind": probe["kind"],
+                "status": 503 if verdict == "soft" else 200,
+                "latency_ms": 100,
+                "verdict": verdict,
+                "reason": reason,
+            }
+
+        with mock.patch.object(WATCHDOG, "http_probe", side_effect=fake_probe):
+            result = WATCHDOG.route_probe("http://127.0.0.1:7897", config)
+        self.assertEqual(result["classification"], "soft_unstable")
+        self.assertFalse(result["candidate_eligible"])
+
+    def test_hard_probe_is_retried_before_the_round_counts_as_failure(self):
+        config = load_settings()
+        calls = {}
+        lock = threading.Lock()
+
+        def fake_probe(proxy_url, probe):
+            del proxy_url
+            name = probe["name"]
+            with lock:
+                calls[name] = calls.get(name, 0) + 1
+                attempt = calls[name]
+            if name == "openai_api" and attempt == 1:
+                verdict, reason, status = "hard", "timeout", 0
+            elif name == "chatgpt_web":
+                verdict, reason, status = "soft", "cloudflare_challenge", 403
+            else:
+                verdict, reason, status = "healthy", "expected_transport", 200
+            return {
+                "name": name,
+                "kind": probe["kind"],
+                "status": status,
+                "latency_ms": 100,
+                "verdict": verdict,
+                "reason": reason,
+            }
+
+        with (
+            mock.patch.object(WATCHDOG, "http_probe", side_effect=fake_probe),
+            mock.patch.object(WATCHDOG.time, "sleep"),
+        ):
+            result = WATCHDOG.route_probe("http://127.0.0.1:7897", config)
+        self.assertEqual(result["classification"], "browser_ambiguous")
+        self.assertEqual(result["recovered_hard_targets"], ["openai_api"])
+        self.assertEqual(calls["openai_api"], 2)
+        self.assertEqual(calls["openai_auth"], 1)
+
+    def test_repeated_hard_probe_still_counts_as_hard(self):
+        config = load_settings()
+        calls = {}
+
+        def fake_probe(proxy_url, probe):
+            del proxy_url
+            name = probe["name"]
+            calls[name] = calls.get(name, 0) + 1
+            if name == "openai_api":
+                verdict, reason, status = "hard", "timeout", 0
+            elif name == "chatgpt_web":
+                verdict, reason, status = "soft", "cloudflare_challenge", 403
+            else:
+                verdict, reason, status = "healthy", "expected_transport", 200
+            return {
+                "name": name,
+                "kind": probe["kind"],
+                "status": status,
+                "latency_ms": 100,
+                "verdict": verdict,
+                "reason": reason,
+            }
+
+        with (
+            mock.patch.object(WATCHDOG, "http_probe", side_effect=fake_probe),
+            mock.patch.object(WATCHDOG.time, "sleep"),
+        ):
+            result = WATCHDOG.route_probe("http://127.0.0.1:7897", config)
+        self.assertEqual(result["classification"], "hard_failure")
+        self.assertEqual(result["recovered_hard_targets"], [])
+        self.assertEqual(calls["openai_api"], 2)
 
     def test_unsupported_region_is_hard(self):
         verdict, reason = WATCHDOG.classify_probe(
@@ -154,6 +292,55 @@ class DomainAndConnectionTests(unittest.TestCase):
         self.assertEqual(closed, 1)
         self.assertEqual(calls, [("DELETE", "/connections/old-ai")])
 
+    def test_close_all_stale_ai_connections_but_keep_new_and_github(self):
+        calls = []
+
+        class Controller(WATCHDOG.ClashController):
+            def __init__(self):
+                pass
+
+            def request(self, method, path, payload=None, timeout=15):
+                del payload, timeout
+                if method == "GET":
+                    return {
+                        "connections": [
+                            {
+                                "id": "old-ai",
+                                "metadata": {"host": "chatgpt.com"},
+                                "chains": ["旧节点", "🤖 AI稳定出口"],
+                            },
+                            {
+                                "id": "older-ai",
+                                "metadata": {"host": "ws.chatgpt.com"},
+                                "chains": ["更旧节点", "🤖 AI稳定出口"],
+                            },
+                            {
+                                "id": "new-ai",
+                                "metadata": {"host": "api.openai.com"},
+                                "chains": ["新节点", "🤖 AI稳定出口"],
+                            },
+                            {
+                                "id": "github",
+                                "metadata": {"host": "github.com"},
+                                "chains": ["旧节点", "🔰 节点选择"],
+                            },
+                        ]
+                    }
+                calls.append((method, path))
+                return {}
+
+        closed = Controller().close_stale_ai_connections(
+            "新节点", load_settings()["ai_domain_suffixes"]
+        )
+        self.assertEqual(closed, 2)
+        self.assertEqual(
+            calls,
+            [
+                ("DELETE", "/connections/old-ai"),
+                ("DELETE", "/connections/older-ai"),
+            ],
+        )
+
 
 class PoolTests(unittest.TestCase):
     def make_entry(self, ip, asn, country, successes=10, latency=300):
@@ -164,6 +351,8 @@ class PoolTests(unittest.TestCase):
                 "asn": asn,
                 "exit_country": country,
                 "openai_status": "healthy",
+                "candidate_eligible": True,
+                "candidate_verified_at": 10_000,
                 "deep_verified_at": 10_000,
                 "successes": successes,
                 "median_ms": latency,
@@ -176,7 +365,8 @@ class PoolTests(unittest.TestCase):
         config = load_settings()
         config["active_pool_max"] = 3
         config["warm_pool_max"] = 3
-        config["deep_verification_ttl_seconds"] = 20_000
+        config["active_candidate_ttl_seconds"] = 2_000
+        config["warm_candidate_ttl_seconds"] = 2_000
         state = WATCHDOG.default_state()
         state["nodes"] = {
             "节点A": self.make_entry("192.0.2.1", "AS1", "US", 20, 200),
@@ -196,7 +386,8 @@ class PoolTests(unittest.TestCase):
     def test_current_healthy_node_is_retained(self):
         config = load_settings()
         config["active_pool_max"] = 2
-        config["deep_verification_ttl_seconds"] = 20_000
+        config["active_candidate_ttl_seconds"] = 2_000
+        config["warm_candidate_ttl_seconds"] = 2_000
         state = WATCHDOG.default_state()
         state["nodes"] = {
             "稳定节点": self.make_entry("192.0.2.1", "AS1", "US", 100, 100),
@@ -247,15 +438,205 @@ class PoolTests(unittest.TestCase):
         self.assertEqual(duration, 300)
         self.assertTrue(entry["needs_recovery"])
         for offset in range(3):
+            WATCHDOG.apply_deep_scan(
+                state,
+                {
+                    "node": "节点",
+                    "route": healthy_route(),
+                    "geo": {
+                        "ok": True,
+                        "exit_ip": "192.0.2.10",
+                        "exit_country": "US",
+                        "exit_region": "US",
+                        "asn": "AS1",
+                        "as_organization": "Example",
+                    },
+                },
+                1_301 + offset * 6,
+                config,
+            )
+        self.assertFalse(entry["needs_recovery"])
+
+    def test_shallow_preflight_cannot_clear_recovery(self):
+        config = load_settings()
+        state = WATCHDOG.default_state()
+        WATCHDOG.quarantine_node(state, "节点", config, 1_000)
+        for offset in range(5):
             WATCHDOG.record_preflight(
                 state,
                 "节点",
                 True,
-                200,
+                100,
                 1_301 + offset,
                 config,
             )
-        self.assertFalse(entry["needs_recovery"])
+        self.assertTrue(state["nodes"]["节点"]["needs_recovery"])
+        self.assertEqual(state["nodes"]["节点"]["recovery_successes"], 0)
+
+    def test_candidate_samples_require_spacing_and_freshness(self):
+        config = load_settings()
+        legacy = WATCHDOG.node_template("ss")
+        legacy["candidate_samples"] = [
+            {"time": 100, "eligible": True},
+            {"time": 106, "eligible": True},
+        ]
+        self.assertFalse(WATCHDOG.candidate_has_required_samples(legacy, config, 106))
+
+        entry = WATCHDOG.node_template("ss")
+        entry["candidate_samples"] = [
+            {"time": 100, "eligible": True, "retry_free": True},
+            {"time": 101, "eligible": True, "retry_free": True},
+        ]
+        self.assertFalse(WATCHDOG.candidate_has_required_samples(entry, config, 101))
+        entry["candidate_samples"][-1]["time"] = 106
+        self.assertTrue(WATCHDOG.candidate_has_required_samples(entry, config, 106))
+        self.assertFalse(WATCHDOG.candidate_has_required_samples(entry, config, 200))
+
+        assisted = WATCHDOG.node_template("ss")
+        assisted["candidate_samples"] = [
+            {"time": 100, "eligible": True, "retry_free": False},
+            {"time": 106, "eligible": True, "retry_free": False},
+        ]
+        self.assertFalse(WATCHDOG.candidate_has_required_samples(assisted, config, 106))
+        assisted["candidate_samples"][-1]["retry_free"] = True
+        self.assertTrue(WATCHDOG.candidate_has_required_samples(assisted, config, 106))
+
+    def test_retry_assisted_deep_sample_is_usable_but_not_retry_free(self):
+        state = WATCHDOG.default_state()
+        result = healthy_route()
+        result["recovered_hard_targets"] = ["openai_api"]
+        WATCHDOG.update_route_observation(
+            state,
+            "候选",
+            result,
+            1_000,
+            deep=True,
+            source="candidate_preflight",
+        )
+        entry = state["nodes"]["候选"]
+        self.assertTrue(entry["candidate_eligible"])
+        self.assertTrue(entry["candidate_samples"][-1]["eligible"])
+        self.assertFalse(entry["candidate_samples"][-1]["retry_free"])
+
+    def test_web_feedback_applies_to_shared_exit_and_expires(self):
+        state = WATCHDOG.default_state()
+        state["nodes"] = {
+            "节点A": self.make_entry("192.0.2.1", "AS1", "US"),
+            "节点A重复": self.make_entry("192.0.2.1", "as1", "us"),
+            "节点B": self.make_entry("198.51.100.2", "AS2", "JP"),
+        }
+        result = WATCHDOG.record_web_feedback(
+            state,
+            "节点A",
+            WATCHDOG.WEB_FEEDBACK_REJECTED,
+            1_000,
+            100,
+            "browser_login_failed",
+        )
+        self.assertEqual(set(result["affected_nodes"]), {"节点A", "节点A重复"})
+        self.assertEqual(
+            WATCHDOG.web_feedback_status(state["nodes"]["节点A重复"], 1_050),
+            WATCHDOG.WEB_FEEDBACK_REJECTED,
+        )
+        self.assertEqual(
+            WATCHDOG.web_feedback_status(state["nodes"]["节点B"], 1_050),
+            "unknown",
+        )
+        self.assertEqual(
+            WATCHDOG.web_feedback_status(state["nodes"]["节点A"], 1_100),
+            "unknown",
+        )
+
+    def test_web_feedback_invalidates_when_exit_fingerprint_changes(self):
+        state = WATCHDOG.default_state()
+        state["nodes"] = {
+            "动态出口": self.make_entry("192.0.2.1", "AS1", "US"),
+        }
+        WATCHDOG.record_web_feedback(
+            state,
+            "动态出口",
+            WATCHDOG.WEB_FEEDBACK_REJECTED,
+            1_000,
+            10_000,
+            "browser_login_failed",
+        )
+        state["nodes"]["动态出口"]["exit_ip"] = "198.51.100.2"
+        self.assertEqual(
+            WATCHDOG.web_feedback_status(state["nodes"]["动态出口"], 1_050),
+            "unknown",
+        )
+
+    def test_rejected_exit_is_not_a_pool_or_failover_candidate(self):
+        config = load_settings()
+        config["deep_verification_ttl_seconds"] = 20_000
+        state = WATCHDOG.default_state()
+        state["nodes"] = {
+            "当前": self.make_entry("192.0.2.1", "AS1", "US"),
+            "网页失败": self.make_entry("198.51.100.2", "AS2", "JP"),
+            "未知": self.make_entry("203.0.113.3", "AS3", "SG"),
+        }
+        WATCHDOG.record_web_feedback(
+            state,
+            "网页失败",
+            WATCHDOG.WEB_FEEDBACK_REJECTED,
+            10_500,
+            1_000,
+            "browser_login_failed",
+        )
+        catalog = {name: "ss" for name in state["nodes"]}
+        WATCHDOG.rebuild_pools(state, catalog, config, 11_000, current="当前")
+        self.assertNotIn("网页失败", state["pools"]["active"])
+        self.assertNotIn("网页失败", state["pools"]["warm"])
+        ordered = WATCHDOG.candidate_order(
+            state,
+            ["网页失败", "未知"],
+            "当前",
+            11_000,
+        )
+        self.assertEqual(ordered, ["未知"])
+
+    def test_confirmed_browser_exit_is_preferred_over_unknown(self):
+        state = WATCHDOG.default_state()
+        state["nodes"] = {
+            "当前": self.make_entry("192.0.2.1", "AS1", "US"),
+            "未知": self.make_entry("198.51.100.2", "AS2", "JP"),
+            "已确认": self.make_entry("203.0.113.3", "AS3", "SG"),
+        }
+        for name in ("未知", "已确认"):
+            state["nodes"][name]["preflight_ok"] = True
+        WATCHDOG.record_web_feedback(
+            state,
+            "已确认",
+            WATCHDOG.WEB_FEEDBACK_CONFIRMED,
+            1_000,
+            10_000,
+            "browser_login_success",
+        )
+        ordered = WATCHDOG.candidate_order(
+            state,
+            ["未知", "已确认"],
+            "当前",
+            1_050,
+        )
+        self.assertEqual(ordered[0], "已确认")
+
+    def test_confirmed_browser_feedback_does_not_bypass_network_quarantine(self):
+        config = load_settings()
+        config["deep_verification_ttl_seconds"] = 20_000
+        state = WATCHDOG.default_state()
+        entry = self.make_entry("203.0.113.3", "AS3", "SG")
+        entry["cooldown_until"] = 2_000
+        entry["needs_recovery"] = True
+        state["nodes"] = {"冷却节点": entry}
+        WATCHDOG.record_web_feedback(
+            state,
+            "冷却节点",
+            WATCHDOG.WEB_FEEDBACK_CONFIRMED,
+            1_000,
+            10_000,
+            "browser_login_success",
+        )
+        self.assertFalse(WATCHDOG.pool_eligible(entry, config, 1_050))
 
 
 class SwitchingGuardTests(unittest.TestCase):
@@ -268,6 +649,8 @@ class SwitchingGuardTests(unittest.TestCase):
                 "exit_country": "US",
                 "asn": asn,
                 "openai_status": "healthy",
+                "candidate_eligible": True,
+                "candidate_verified_at": 10_000,
                 "deep_verified_at": 10_000,
                 "successes": successes,
                 "last_success_at": 10_000,
@@ -282,6 +665,93 @@ class SwitchingGuardTests(unittest.TestCase):
         self.assertFalse(WATCHDOG.mark_all_unavailable(state, config, 1_010))
         WATCHDOG.clear_all_unavailable(state)
         self.assertTrue(WATCHDOG.mark_all_unavailable(state, config, 2_000))
+
+    def test_prepare_candidate_requires_two_isolated_samples(self):
+        config = load_settings()
+        state = WATCHDOG.default_state()
+        state["monitor"]["last_seen_node"] = "当前"
+        state["nodes"] = {
+            "当前": self.switch_entry("192.0.2.1", "AS1", 20),
+            "候选": WATCHDOG.node_template("ss"),
+        }
+        state["nodes"]["候选"].update(
+            {"exit_ip": "198.51.100.2", "asn": "AS2", "exit_country": "JP"}
+        )
+        catalog = {"当前": "ss", "候选": "ss"}
+        timestamp = WATCHDOG.now_ts()
+        scan_result = {
+            "node": "候选",
+            "route": healthy_route(),
+            "geo": {
+                "ok": True,
+                "exit_ip": "198.51.100.2",
+                "exit_country": "JP",
+                "exit_region": "JP",
+                "asn": "AS2",
+                "as_organization": "Example",
+            },
+        }
+        WATCHDOG.ensure_failover_episode(state, "当前", timestamp)
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch.object(
+                WATCHDOG,
+                "preflight_nodes",
+                return_value=[{"node": "候选", "ok": True, "latency_ms": 100}],
+            ),
+            mock.patch.object(
+                WATCHDOG,
+                "_isolated_candidate_rounds",
+                return_value={
+                    "node": "候选",
+                    "observations": [
+                        {"time": timestamp - 6, "result": scan_result},
+                        {"time": timestamp, "result": scan_result},
+                    ],
+                    "error": None,
+                },
+            ),
+        ):
+            prepared = WATCHDOG.prepare_failover_candidates(
+                FakeController("当前"),
+                state,
+                catalog,
+                config,
+                Path(directory) / "monitor.jsonl",
+                "当前",
+            )
+        self.assertEqual([item["node"] for item in prepared], ["候选"])
+        self.assertTrue(
+            WATCHDOG.candidate_has_required_samples(state["nodes"]["候选"], config, timestamp)
+        )
+
+    def test_v2_state_migration_preserves_evidence_but_requires_revalidation(self):
+        old = WATCHDOG.default_state()
+        old["schema_version"] = 2
+        entry = self.switch_entry("192.0.2.10", "AS1", 20)
+        entry["openai_status"] = "unavailable"
+        entry["web_feedback"] = {
+            "status": "confirmed",
+            "observed_at": 1_000,
+            "expires_at": 9_999_999_999,
+            "exit_fingerprint": {
+                "exit_ip": "192.0.2.10",
+                "asn": "AS1",
+                "exit_country": "US",
+            },
+            "reason": "browser_login_success",
+        }
+        old["nodes"] = {"节点": entry}
+        old["switch_history"] = [{"old_node": "A", "new_node": "节点"}]
+        migrated = WATCHDOG.migrate_v2_state(old)
+        migrated_entry = migrated["nodes"]["节点"]
+        self.assertEqual(migrated["schema_version"], 3)
+        self.assertEqual(migrated_entry["exit_ip"], "192.0.2.10")
+        self.assertEqual(migrated_entry["web_feedback"]["status"], "confirmed")
+        self.assertEqual(migrated_entry["openai_status"], "unknown")
+        self.assertFalse(migrated_entry["candidate_eligible"])
+        self.assertEqual(migrated["pools"]["cold"], ["节点"])
+        self.assertEqual(len(migrated["switch_history"]), 1)
 
     def test_manual_selection_does_not_create_switch_history(self):
         config = load_settings()
@@ -327,18 +797,23 @@ class SwitchingGuardTests(unittest.TestCase):
 
     def test_timing_budget_is_within_thirty_seconds(self):
         config = load_settings()
-        first_failure_to_switch_upper_bound = (
-            int(config["monitor_interval_seconds"])
-            + int(config["candidate_preflight_timeout_ms"]) // 1000
+        candidate_commit_budget = (
+            int(config["candidate_commit_preflight_timeout_ms"]) / 1000
             + int(config["switch_connection_wait_seconds"])
             + max(int(item["timeout_seconds"]) for item in config["active_probes"])
         )
+        first_candidate_upper_bound = (
+            int(config["failure_confirmation_min_gap_seconds"]) + candidate_commit_budget
+        )
+        second_candidate_upper_bound = first_candidate_upper_bound + candidate_commit_budget
         self.assertEqual(config["failure_rounds_before_switch"], 2)
-        self.assertGreaterEqual(config["candidate_concurrency"], config["active_pool_max"])
-        self.assertLessEqual(first_failure_to_switch_upper_bound, 30)
+        self.assertEqual(config["candidate_prepare_count"], 3)
+        self.assertLessEqual(first_candidate_upper_bound, 20)
+        self.assertLessEqual(second_candidate_upper_bound, 30)
 
-    def test_different_targets_do_not_form_two_consecutive_failures(self):
+    def test_different_targets_form_two_consecutive_hard_rounds(self):
         config = load_settings()
+        config["failure_confirmation_min_gap_seconds"] = 0
         state = WATCHDOG.default_state()
         state["monitor"]["last_seen_node"] = "节点B"
         catalog = {"节点A": "ss", "节点B": "ss"}
@@ -373,25 +848,35 @@ class SwitchingGuardTests(unittest.TestCase):
                     "direct_network_probe",
                     return_value={"ok": True, "results": {}},
                 ),
+                mock.patch.object(
+                    WATCHDOG,
+                    "prepare_failover_candidates",
+                    return_value=[],
+                ),
+                mock.patch.object(
+                    WATCHDOG,
+                    "failover",
+                    return_value={
+                        "ok": False,
+                        "reason": "candidates_not_ready",
+                    },
+                ) as failover,
             ):
-                first = WATCHDOG.health_iteration(
+                result = WATCHDOG.health_iteration(
                     fake, state, catalog, config, state_path, log_path
                 )
-                second = WATCHDOG.health_iteration(
-                    fake, state, catalog, config, state_path, log_path
-                )
-        self.assertEqual(first["status"], "waiting_confirmation")
-        self.assertEqual(second["status"], "waiting_confirmation")
-        self.assertEqual(state["monitor"]["consecutive_hard_failures"], 1)
+        self.assertEqual(result["status"], "candidate_retry_backoff")
+        self.assertEqual(state["monitor"]["consecutive_hard_failures"], 2)
+        failover.assert_called_once()
         self.assertEqual(fake.selections, [])
 
-    def test_same_target_switches_only_after_second_hard_failure(self):
+    def test_same_target_switches_after_second_hard_failure(self):
         config = load_settings()
         config.update(
             {
                 "active_pool_max": 2,
                 "warm_pool_max": 0,
-                "deep_verification_ttl_seconds": 10_000_000_000,
+                "failure_confirmation_min_gap_seconds": 0,
             }
         )
         state = WATCHDOG.default_state()
@@ -404,6 +889,7 @@ class SwitchingGuardTests(unittest.TestCase):
         hard_failure = {
             "classification": "hard_failure",
             "usable": False,
+            "candidate_eligible": False,
             "hard_reasons": ["openai_api:timeout"],
             "soft_reasons": [],
             "median_ms": None,
@@ -434,19 +920,22 @@ class SwitchingGuardTests(unittest.TestCase):
             ),
             mock.patch.object(WATCHDOG.time, "sleep"),
             mock.patch.object(WATCHDOG, "notify"),
+            mock.patch.object(
+                WATCHDOG,
+                "prepare_failover_candidates",
+                return_value=[
+                    {
+                        "node": "节点A",
+                        "layer": "active",
+                        "verified_at": 10_000,
+                        "classification": "healthy",
+                    }
+                ],
+            ),
         ):
             state_path = Path(directory) / "state.json"
             log_path = Path(directory) / "monitor.jsonl"
-            first = WATCHDOG.health_iteration(
-                controller,
-                state,
-                catalog,
-                config,
-                state_path,
-                log_path,
-            )
-            self.assertEqual(controller.selections, [])
-            second = WATCHDOG.health_iteration(
+            result = WATCHDOG.health_iteration(
                 controller,
                 state,
                 catalog,
@@ -455,10 +944,255 @@ class SwitchingGuardTests(unittest.TestCase):
                 log_path,
             )
 
-        self.assertEqual(first["status"], "waiting_confirmation")
-        self.assertEqual(second["status"], "switched")
+        self.assertEqual(result["status"], "switched")
         self.assertEqual(controller.current, "节点A")
         self.assertEqual(len(controller.selections), 1)
+
+    def test_candidate_preparation_overlaps_confirmation_and_recovery_cancels_episode(self):
+        config = load_settings()
+        config["failure_confirmation_min_gap_seconds"] = 0
+        state = WATCHDOG.default_state()
+        state["monitor"]["last_seen_node"] = "节点B"
+        catalog = {"节点A": "ss", "节点B": "ss"}
+        hard_failure = {
+            "classification": "hard_failure",
+            "usable": False,
+            "candidate_eligible": False,
+            "hard_reasons": ["openai_api:timeout"],
+            "soft_reasons": [],
+            "median_ms": None,
+            "probes": {},
+        }
+        preparation_started = threading.Event()
+        release_preparation = threading.Event()
+
+        def prepare(*args):
+            del args
+            preparation_started.set()
+            self.assertTrue(release_preparation.wait(1))
+            return []
+
+        def confirmation_sleep(seconds):
+            del seconds
+            self.assertTrue(preparation_started.wait(1))
+            release_preparation.set()
+
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch.object(
+                WATCHDOG,
+                "route_probe",
+                side_effect=[hard_failure, healthy_route()],
+            ),
+            mock.patch.object(
+                WATCHDOG,
+                "direct_network_probe",
+                return_value={"ok": True, "results": {}},
+            ),
+            mock.patch.object(
+                WATCHDOG,
+                "prepare_failover_candidates",
+                side_effect=prepare,
+            ),
+            mock.patch.object(WATCHDOG.time, "sleep", side_effect=confirmation_sleep),
+        ):
+            result = WATCHDOG.health_iteration(
+                FakeController("节点B"),
+                state,
+                catalog,
+                config,
+                Path(directory) / "state.json",
+                Path(directory) / "monitor.jsonl",
+            )
+        self.assertEqual(result["status"], "healthy")
+        self.assertEqual(state["monitor"]["consecutive_hard_failures"], 0)
+        self.assertIsNone(state["monitor"]["failover_episode"])
+
+    def test_commit_preflight_failure_never_selects_candidate(self):
+        config = load_settings()
+        state = WATCHDOG.default_state()
+        state["nodes"] = {
+            "当前": self.switch_entry("192.0.2.1", "AS1", 20),
+            "候选": self.switch_entry("198.51.100.2", "AS2", 10),
+        }
+        catalog = {"当前": "ss", "候选": "ss"}
+        controller = FakeController("当前")
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch.object(
+                WATCHDOG,
+                "prepare_failover_candidates",
+                return_value=[
+                    {
+                        "node": "候选",
+                        "layer": "active",
+                        "verified_at": 10_000,
+                        "classification": "healthy",
+                    }
+                ],
+            ),
+            mock.patch.object(WATCHDOG, "notify"),
+        ):
+            result = WATCHDOG.failover(
+                controller,
+                state,
+                catalog,
+                config,
+                Path(directory) / "monitor.jsonl",
+                "当前",
+                "测试故障",
+            )
+        self.assertFalse(result["ok"])
+        self.assertEqual(controller.selections, [])
+        self.assertTrue(state["nodes"]["候选"]["needs_recovery"])
+
+    def test_commit_preflight_failure_does_not_consume_live_attempt_budget(self):
+        config = load_settings()
+        config["max_candidate_attempts_per_failover"] = 1
+        state = WATCHDOG.default_state()
+        state["nodes"] = {
+            "当前": self.switch_entry("192.0.2.1", "AS1", 20),
+            "陈旧候选": self.switch_entry("198.51.100.2", "AS2", 10),
+            "健康候选": self.switch_entry("203.0.113.3", "AS3", 9),
+        }
+        catalog = {name: "ss" for name in state["nodes"]}
+
+        class Controller(FakeController):
+            def delay(self, node, url, timeout_ms, expected):
+                del url, timeout_ms, expected
+                return None if node == "陈旧候选" else 100
+
+        controller = Controller("当前")
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch.object(WATCHDOG, "route_probe", return_value=healthy_route()),
+            mock.patch.object(WATCHDOG.time, "sleep"),
+            mock.patch.object(WATCHDOG, "notify"),
+            mock.patch.object(
+                WATCHDOG,
+                "prepare_failover_candidates",
+                return_value=[
+                    {"node": "陈旧候选", "layer": "active"},
+                    {"node": "健康候选", "layer": "active"},
+                ],
+            ),
+        ):
+            result = WATCHDOG.failover(
+                controller,
+                state,
+                catalog,
+                config,
+                Path(directory) / "monitor.jsonl",
+                "当前",
+                "测试故障",
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(controller.current, "健康候选")
+        self.assertEqual(controller.selections, [(config["group_name"], "健康候选")])
+
+    def test_live_verification_rejects_candidate_when_followup_needs_retry(self):
+        config = load_settings()
+        state = WATCHDOG.default_state()
+        state["nodes"] = {
+            "当前": self.switch_entry("192.0.2.1", "AS1", 20),
+            "候选": self.switch_entry("198.51.100.2", "AS2", 10),
+            "尚未尝试": self.switch_entry("203.0.113.3", "AS3", 5),
+        }
+        catalog = {name: "ss" for name in state["nodes"]}
+
+        class Controller(FakeController):
+            def delay(self, node, url, timeout_ms, expected):
+                del node, url, timeout_ms, expected
+                return 100
+
+        controller = Controller("当前")
+        unstable = healthy_route()
+        unstable["recovered_hard_targets"] = ["openai_api"]
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch.object(WATCHDOG, "route_probe", return_value=unstable) as route_probe,
+            mock.patch.object(WATCHDOG.time, "sleep"),
+            mock.patch.object(WATCHDOG, "notify") as notify,
+            mock.patch.object(
+                WATCHDOG,
+                "prepare_failover_candidates",
+                return_value=[
+                    {
+                        "node": "候选",
+                        "layer": "active",
+                        "verified_at": 10_000,
+                        "classification": "healthy",
+                    }
+                ],
+            ),
+        ):
+            result = WATCHDOG.failover(
+                controller,
+                state,
+                catalog,
+                config,
+                Path(directory) / "monitor.jsonl",
+                "当前",
+                "测试故障",
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(controller.current, "当前")
+        self.assertEqual(
+            controller.selections,
+            [(config["group_name"], "候选"), (config["group_name"], "当前")],
+        )
+        self.assertTrue(state["nodes"]["候选"]["needs_recovery"])
+        self.assertEqual(route_probe.call_count, 2)
+        notify.assert_not_called()
+
+    def test_retry_assisted_live_verification_requires_clean_followup(self):
+        config = load_settings()
+        state = WATCHDOG.default_state()
+        state["nodes"] = {
+            "当前": self.switch_entry("192.0.2.1", "AS1", 20),
+            "候选": self.switch_entry("198.51.100.2", "AS2", 10),
+        }
+        catalog = {name: "ss" for name in state["nodes"]}
+
+        class Controller(FakeController):
+            def delay(self, node, url, timeout_ms, expected):
+                del node, url, timeout_ms, expected
+                return 100
+
+        assisted = healthy_route()
+        assisted["recovered_hard_targets"] = ["openai_api"]
+        controller = Controller("当前")
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch.object(
+                WATCHDOG,
+                "route_probe",
+                side_effect=[assisted, healthy_route()],
+            ) as route_probe,
+            mock.patch.object(WATCHDOG.time, "sleep"),
+            mock.patch.object(WATCHDOG, "notify") as notify,
+            mock.patch.object(
+                WATCHDOG,
+                "prepare_failover_candidates",
+                return_value=[{"node": "候选", "layer": "active"}],
+            ),
+        ):
+            result = WATCHDOG.failover(
+                controller,
+                state,
+                catalog,
+                config,
+                Path(directory) / "monitor.jsonl",
+                "当前",
+                "测试故障",
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(controller.current, "候选")
+        self.assertEqual(route_probe.call_count, 2)
+        notify.assert_called_once()
 
     def test_failover_uses_warm_pool_when_active_pool_fails(self):
         config = load_settings()
@@ -480,6 +1214,7 @@ class SwitchingGuardTests(unittest.TestCase):
         class Controller(FakeController):
             def __init__(self):
                 super().__init__("当前")
+                self.stale_close_calls = 0
 
             def delay(self, node, url, timeout_ms, expected):
                 del url, timeout_ms, expected
@@ -489,12 +1224,28 @@ class SwitchingGuardTests(unittest.TestCase):
                 del old_node, suffixes
                 return 2
 
+            def close_stale_ai_connections(self, new_node, suffixes):
+                del new_node, suffixes
+                return 2
+
         controller = Controller()
         with (
             tempfile.TemporaryDirectory() as directory,
             mock.patch.object(WATCHDOG, "route_probe", return_value=healthy_route()),
             mock.patch.object(WATCHDOG.time, "sleep"),
             mock.patch.object(WATCHDOG, "notify"),
+            mock.patch.object(
+                WATCHDOG,
+                "prepare_failover_candidates",
+                return_value=[
+                    {
+                        "node": "温备健康",
+                        "layer": "warm",
+                        "verified_at": 10_000,
+                        "classification": "healthy",
+                    }
+                ],
+            ) as prepare,
         ):
             result = WATCHDOG.failover(
                 controller,
@@ -508,6 +1259,7 @@ class SwitchingGuardTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["layer"], "warm")
         self.assertEqual(result["new_node"], "温备健康")
+        self.assertEqual(prepare.call_args.kwargs["desired_count"], 2)
 
     def test_failover_notifies_all_unavailable_only_once(self):
         config = load_settings()
@@ -530,15 +1282,24 @@ class SwitchingGuardTests(unittest.TestCase):
         class Controller(FakeController):
             def __init__(self):
                 super().__init__("当前")
+                self.stale_close_calls = 0
 
             def delay(self, node, url, timeout_ms, expected):
                 del node, url, timeout_ms, expected
                 return None
 
         controller = Controller()
+        WATCHDOG.ensure_failover_episode(state, "当前", 1_000)
+        for node in ("活跃故障", "温备故障", "冷备故障"):
+            WATCHDOG.record_episode_attempt(state, node)
         with (
             tempfile.TemporaryDirectory() as directory,
             mock.patch.object(WATCHDOG, "notify") as notify,
+            mock.patch.object(
+                WATCHDOG,
+                "prepare_failover_candidates",
+                return_value=[],
+            ),
         ):
             log_path = Path(directory) / "monitor.jsonl"
             first = WATCHDOG.failover(
@@ -585,6 +1346,7 @@ class SwitchingGuardTests(unittest.TestCase):
         class Controller(FakeController):
             def __init__(self):
                 super().__init__("当前")
+                self.stale_close_calls = 0
 
             def delay(self, node, url, timeout_ms, expected):
                 del node, url, timeout_ms, expected
@@ -592,6 +1354,11 @@ class SwitchingGuardTests(unittest.TestCase):
 
             def close_old_ai_connections(self, old_node, suffixes):
                 del old_node, suffixes
+                return 0
+
+            def close_stale_ai_connections(self, new_node, suffixes):
+                del new_node, suffixes
+                self.stale_close_calls += 1
                 return 0
 
         hard_failure = {
@@ -608,6 +1375,18 @@ class SwitchingGuardTests(unittest.TestCase):
             mock.patch.object(WATCHDOG, "route_probe", return_value=hard_failure),
             mock.patch.object(WATCHDOG.time, "sleep"),
             mock.patch.object(WATCHDOG, "notify") as notify,
+            mock.patch.object(
+                WATCHDOG,
+                "prepare_failover_candidates",
+                return_value=[
+                    {
+                        "node": "候选A",
+                        "layer": "active",
+                        "verified_at": 10_000,
+                        "classification": "healthy",
+                    }
+                ],
+            ),
         ):
             result = WATCHDOG.failover(
                 controller,
@@ -619,14 +1398,41 @@ class SwitchingGuardTests(unittest.TestCase):
                 "测试故障",
             )
         self.assertFalse(result["ok"])
-        self.assertEqual(result["reason"], "attempt_budget_exhausted")
+        self.assertEqual(result["reason"], "candidates_not_ready")
         self.assertFalse(result["notified"])
         self.assertEqual(len(result["attempted"]), 1)
         self.assertEqual(controller.current, "当前")
+        self.assertEqual(controller.stale_close_calls, 0)
         notify.assert_not_called()
 
 
 class CatalogTests(unittest.TestCase):
+    def test_probe_stack_change_invalidates_old_candidate_evidence(self):
+        config = load_settings()
+        state = WATCHDOG.default_state()
+        entry = WATCHDOG.node_template("ss")
+        entry.update(
+            {
+                "candidate_eligible": True,
+                "candidate_verified_at": 1_000,
+                "candidate_samples": [{"time": 1_000, "eligible": True}],
+            }
+        )
+        state["nodes"] = {"节点": entry}
+        state["inventory"]["probe_stack_signature"] = "old"
+        with (
+            mock.patch.object(WATCHDOG, "load_real_nodes", return_value={"节点": "ss"}),
+            mock.patch.object(
+                WATCHDOG,
+                "runtime_probe_stack_signature",
+                return_value="new",
+            ),
+        ):
+            WATCHDOG.refresh_catalog(state, config, 2_000)
+        self.assertFalse(entry["candidate_eligible"])
+        self.assertEqual(entry["candidate_verified_at"], 0)
+        self.assertEqual(entry["candidate_samples"], [])
+
     def test_notice_and_groups_are_not_nodes(self):
         exclude = re.compile(load_settings()["node_exclude_regex"], re.I)
         self.assertTrue(

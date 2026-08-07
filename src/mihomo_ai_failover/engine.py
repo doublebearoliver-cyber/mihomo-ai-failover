@@ -13,6 +13,7 @@ import argparse
 import concurrent.futures
 import datetime as dt
 import fcntl
+import hashlib
 import http.client
 import ipaddress
 import json
@@ -45,9 +46,13 @@ from .config import (
 )
 
 DEFAULT_CONFIG = default_config_path()
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 SCANNER_GROUP = "🔬 AI出口扫描"
 GROUP_TYPES = {"Selector", "URLTest", "Fallback", "LoadBalance", "Compatible"}
+WEB_FEEDBACK_CONFIRMED = "confirmed"
+WEB_FEEDBACK_REJECTED = "rejected"
+WEB_FEEDBACK_STATUSES = {WEB_FEEDBACK_CONFIRMED, WEB_FEEDBACK_REJECTED}
+WEB_FEEDBACK_CONFIRMATION = "RECORD_WEB_FEEDBACK"
 
 
 class ControllerError(RuntimeError):
@@ -168,6 +173,38 @@ class ClashController:
                 continue
             chains = [str(item) for item in connection.get("chains", [])]
             if old_node not in chains:
+                continue
+            connection_id = connection.get("id")
+            if not connection_id:
+                continue
+            try:
+                self.request(
+                    "DELETE",
+                    f"/connections/{quote(str(connection_id), safe='')}",
+                )
+                closed += 1
+            except ControllerError:
+                continue
+        return closed
+
+    def close_stale_ai_connections(
+        self,
+        new_node: str,
+        suffixes: Sequence[str],
+    ) -> int:
+        """关闭所有仍绑定非新节点的 AI 连接，保留普通网站和新链路。"""
+        try:
+            result = self.request("GET", "/connections")
+        except ControllerError:
+            return 0
+        closed = 0
+        for connection in result.get("connections", []):
+            metadata = connection.get("metadata", {}) or {}
+            host = str(metadata.get("host") or "").lower().rstrip(".")
+            if not host_matches_suffixes(host, suffixes):
+                continue
+            chains = [str(item) for item in connection.get("chains", [])]
+            if new_node in chains:
                 continue
             connection_id = connection.get("id")
             if not connection_id:
@@ -415,6 +452,15 @@ def classify_probe(
             return "soft", f"access_http_{status}"
         return "hard", f"unexpected_http_{status}"
 
+    if kind == "chatgpt_ws":
+        # 未登录的根路径通常返回 404；这里验证的是 TCP/TLS/HTTP 传输路径，
+        # 不把它冒充成已认证的 WebSocket 会话。
+        if status in {200, 301, 302, 400, 401, 403, 404, 426}:
+            return "healthy", f"transport_http_{status}"
+        if status in {429, 500, 502, 503, 504}:
+            return "soft", f"upstream_http_{status}"
+        return "hard", f"unexpected_http_{status}"
+
     if kind == "local":
         if 200 <= status < 400:
             return "healthy", f"http_{status}"
@@ -496,6 +542,27 @@ def route_probe(proxy_url: str, config: dict[str, Any]) -> dict[str, Any]:
     probes = list(config["active_probes"])
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(probes)) as executor:
         results = list(executor.map(lambda item: http_probe(proxy_url, item), probes))
+    initial_hard_targets = {str(item["name"]) for item in results if item["verdict"] == "hard"}
+    probes_by_name = {str(item["name"]): item for item in probes}
+    results_by_name = {str(item["name"]): item for item in results}
+    pending_retry = [
+        probes_by_name[str(item["name"])] for item in results if item["verdict"] == "hard"
+    ]
+    for _ in range(int(config.get("hard_probe_retry_count", 0))):
+        if not pending_retry:
+            break
+        retry_delay = float(config.get("hard_probe_retry_delay_seconds", 0))
+        if retry_delay:
+            time.sleep(retry_delay)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(pending_retry)) as executor:
+            retried = list(executor.map(lambda item: http_probe(proxy_url, item), pending_retry))
+        for item in retried:
+            results_by_name[str(item["name"])] = item
+        pending_retry = [
+            probes_by_name[str(item["name"])] for item in retried if item["verdict"] == "hard"
+        ]
+    results = [results_by_name[str(item["name"])] for item in probes]
+    final_hard_targets = {str(item["name"]) for item in results if item["verdict"] == "hard"}
     by_name = {result["name"]: result for result in results}
     hard = [
         f"{result['name']}:{result['reason']}" for result in results if result["verdict"] == "hard"
@@ -506,14 +573,20 @@ def route_probe(proxy_url: str, config: dict[str, Any]) -> dict[str, Any]:
     required_ok = all(
         by_name.get(name, {}).get("verdict") == "healthy" for name in ("openai_api", "openai_auth")
     )
+    web = by_name.get("chatgpt_web", {})
+    web_challenge_only = (
+        web.get("verdict") == "soft" and web.get("reason") == "cloudflare_challenge"
+    )
+    ws = by_name.get("chatgpt_ws")
+    ws_ok = ws is None or ws.get("verdict") == "healthy"
     if hard:
         classification = "hard_failure"
-    elif required_ok and soft:
-        classification = "degraded"
-    elif required_ok:
+    elif required_ok and ws_ok and web_challenge_only and len(soft) == 1:
+        classification = "browser_ambiguous"
+    elif required_ok and ws_ok and not soft:
         classification = "healthy"
     else:
-        classification = "soft_failure"
+        classification = "soft_unstable"
     latencies = [
         int(result["latency_ms"])
         for result in results
@@ -521,7 +594,9 @@ def route_probe(proxy_url: str, config: dict[str, Any]) -> dict[str, Any]:
     ]
     return {
         "classification": classification,
-        "usable": classification in {"healthy", "degraded"},
+        "usable": classification in {"healthy", "browser_ambiguous"},
+        "candidate_eligible": classification in {"healthy", "browser_ambiguous"},
+        "recovered_hard_targets": sorted(initial_hard_targets - final_hard_targets),
         "hard_reasons": hard,
         "soft_reasons": soft,
         "median_ms": int(statistics.median(latencies)) if latencies else None,
@@ -564,6 +639,13 @@ def node_template(protocol: str = "unknown") -> dict[str, Any]:
         "asn": None,
         "as_organization": None,
         "openai_status": "unknown",
+        "last_observation": "unknown",
+        "eligibility_state": "unknown",
+        "candidate_eligible": False,
+        "candidate_verified_at": 0,
+        "candidate_samples": [],
+        "last_full_probe_at": 0,
+        "probe_stack_signature": None,
         "deep_verified_at": 0,
         "successes": 0,
         "failures": 0,
@@ -579,6 +661,7 @@ def node_template(protocol: str = "unknown") -> dict[str, Any]:
         "needs_recovery": False,
         "recovery_successes": 0,
         "failure_events": [],
+        "web_feedback": None,
     }
 
 
@@ -591,8 +674,15 @@ def default_state() -> dict[str, Any]:
             "last_status": "unknown",
             "consecutive_hard_failures": 0,
             "hard_failure_streaks": {},
+            "last_hard_failure_at": 0,
             "first_failure_at": 0,
             "failure_reasons": [],
+            "prepared_candidates": [],
+            "failover_episode": None,
+            "probation_until": 0,
+            "probation_node": None,
+            "probation_failures": 0,
+            "last_healthy_at": 0,
             "last_switch_at": 0,
             "last_switch": None,
             "backoff_until": 0,
@@ -613,6 +703,10 @@ def default_state() -> dict[str, Any]:
             "deep_scanned_at": 0,
             "warm_scanned_at": 0,
             "cold_scanned_at": 0,
+            "active_full_scanned_at": 0,
+            "refill_scanned_at": 0,
+            "probe_stack_signature": None,
+            "active_cursor": 0,
             "warm_cursor": 0,
             "cold_cursor": 0,
         },
@@ -648,6 +742,59 @@ def migrate_legacy_state(loaded: dict[str, Any]) -> dict[str, Any]:
     return state
 
 
+def migrate_v2_state(loaded: dict[str, Any]) -> dict[str, Any]:
+    """保留 v2 的历史和出口信息，但废弃会导致池坍塌的旧健康结论。"""
+    state = default_state()
+    old_monitor = loaded.get("monitor", {})
+    if isinstance(old_monitor, dict):
+        for key in state["monitor"]:
+            if key in old_monitor and key not in {
+                "hard_failure_streaks",
+                "prepared_candidates",
+                "failover_episode",
+                "probation_until",
+                "probation_node",
+                "probation_failures",
+            }:
+                state["monitor"][key] = old_monitor[key]
+    state["monitor"]["consecutive_hard_failures"] = 0
+    state["monitor"]["first_failure_at"] = 0
+    state["monitor"]["failure_reasons"] = []
+    state["monitor"]["last_status"] = "revalidation_required"
+
+    old_nodes = loaded.get("nodes", {})
+    if isinstance(old_nodes, dict):
+        for name, value in old_nodes.items():
+            entry = node_template()
+            if isinstance(value, dict):
+                entry.update(value)
+            entry["openai_status"] = "unknown"
+            entry["last_observation"] = "unknown"
+            entry["eligibility_state"] = "unknown"
+            entry["candidate_eligible"] = False
+            entry["candidate_verified_at"] = 0
+            entry["candidate_samples"] = []
+            entry["last_full_probe_at"] = 0
+            entry["probe_stack_signature"] = None
+            if int(entry.get("cooldown_until", 0)) <= now_ts():
+                entry["needs_recovery"] = False
+                entry["recovery_successes"] = 0
+            state["nodes"][str(name)] = entry
+
+    old_inventory = loaded.get("inventory", {})
+    if isinstance(old_inventory, dict):
+        for key in state["inventory"]:
+            if key in old_inventory:
+                state["inventory"][key] = old_inventory[key]
+    history = loaded.get("switch_history", [])
+    if isinstance(history, list):
+        state["switch_history"] = history[-100:]
+    state["pools"]["cold"] = [
+        name for name, entry in state["nodes"].items() if entry.get("present_in_subscription", True)
+    ]
+    return state
+
+
 def load_state(path: Path) -> dict[str, Any]:
     try:
         loaded = json.loads(path.read_text(encoding="utf-8"))
@@ -655,7 +802,10 @@ def load_state(path: Path) -> dict[str, Any]:
         return default_state()
     if not isinstance(loaded, dict):
         return default_state()
-    if int(loaded.get("schema_version", 0)) != SCHEMA_VERSION:
+    loaded_version = int(loaded.get("schema_version", 0))
+    if loaded_version == 2:
+        return migrate_v2_state(loaded)
+    if loaded_version != SCHEMA_VERSION:
         return migrate_legacy_state(loaded)
     state = default_state()
     state.update(loaded)
@@ -666,6 +816,11 @@ def load_state(path: Path) -> dict[str, Any]:
     for key, value in default_state()["inventory"].items():
         state.setdefault("inventory", {}).setdefault(key, value)
     state.setdefault("nodes", {})
+    for entry in state["nodes"].values():
+        if not isinstance(entry, dict):
+            continue
+        for key, value in node_template().items():
+            entry.setdefault(key, value)
     state.setdefault("switch_history", [])
     return state
 
@@ -685,15 +840,123 @@ def success_rate(entry: dict[str, Any]) -> float:
     return (successes + 1) / (successes + failures + 2)
 
 
+def recent_candidate_success_rate(
+    entry: dict[str, Any], timestamp: int, window_seconds: int = 3600
+) -> float:
+    samples = [
+        item
+        for item in entry.get("candidate_samples", [])
+        if isinstance(item, dict) and int(item.get("time", 0)) >= timestamp - window_seconds
+    ]
+    successes = sum(
+        1 for item in samples if item.get("eligible") and item.get("retry_free") is True
+    )
+    return (successes + 1) / (len(samples) + 2)
+
+
+def exit_fingerprint(entry: dict[str, Any]) -> dict[str, str | None] | None:
+    """Return a normalized independent-exit identity, never a node-name identity."""
+    raw_ip = str(entry.get("exit_ip") or "").strip()
+    if not raw_ip:
+        return None
+    try:
+        normalized_ip = str(ipaddress.ip_address(raw_ip))
+    except ValueError:
+        normalized_ip = raw_ip.lower()
+    asn = str(entry.get("asn") or "").strip().upper() or None
+    country = str(entry.get("exit_country") or "").strip().upper() or None
+    return {
+        "exit_ip": normalized_ip,
+        "asn": asn,
+        "exit_country": country,
+    }
+
+
+def active_web_feedback(
+    entry: dict[str, Any],
+    timestamp: int,
+) -> dict[str, Any] | None:
+    """Return unexpired browser feedback only while the exit identity still matches."""
+    feedback = entry.get("web_feedback")
+    if not isinstance(feedback, dict):
+        return None
+    if feedback.get("status") not in WEB_FEEDBACK_STATUSES:
+        return None
+    try:
+        expires_at = int(feedback.get("expires_at", 0))
+    except (TypeError, ValueError):
+        return None
+    if expires_at <= timestamp:
+        return None
+    recorded = feedback.get("exit_fingerprint")
+    current_fingerprint = exit_fingerprint(entry)
+    if not isinstance(recorded, dict) or current_fingerprint is None:
+        return None
+    if exit_fingerprint(recorded) != current_fingerprint:
+        return None
+    return feedback
+
+
+def web_feedback_status(entry: dict[str, Any], timestamp: int) -> str:
+    feedback = active_web_feedback(entry, timestamp)
+    return str(feedback["status"]) if feedback else "unknown"
+
+
+def record_web_feedback(
+    state: dict[str, Any],
+    node: str,
+    status: str,
+    timestamp: int,
+    ttl_seconds: int,
+    reason: str,
+) -> dict[str, Any]:
+    """Attach browser evidence to every node sharing the observed exit fingerprint."""
+    if status not in WEB_FEEDBACK_STATUSES:
+        raise ValueError("invalid_web_feedback_status")
+    if ttl_seconds <= 0:
+        raise ValueError("web_feedback_ttl_must_be_positive")
+    if node not in state.get("nodes", {}):
+        raise ValueError("web_feedback_node_not_found")
+    source = ensure_node(state, node)
+    fingerprint = exit_fingerprint(source)
+    if fingerprint is None:
+        raise ValueError("web_feedback_exit_fingerprint_required")
+
+    expires_at = timestamp + ttl_seconds
+    feedback = {
+        "status": status,
+        "observed_at": timestamp,
+        "expires_at": expires_at,
+        "exit_fingerprint": fingerprint,
+        "reason": clean_text(reason or "manual_browser_validation", 120),
+    }
+    affected_nodes: list[str] = []
+    for candidate, entry in state["nodes"].items():
+        if exit_fingerprint(entry) != fingerprint:
+            continue
+        entry["web_feedback"] = dict(feedback)
+        affected_nodes.append(candidate)
+    return {
+        "status": status,
+        "observed_at": timestamp,
+        "expires_at": expires_at,
+        "affected_nodes": affected_nodes,
+    }
+
+
 def update_route_observation(
     state: dict[str, Any],
     node: str,
     result: dict[str, Any],
     timestamp: int,
     deep: bool = False,
+    source: str = "live",
 ) -> None:
     entry = ensure_node(state, node)
     classification = result["classification"]
+    candidate_eligible = bool(result.get("candidate_eligible"))
+    retry_free = not bool(result.get("recovered_hard_targets"))
+    entry["last_observation"] = classification
     if result.get("usable"):
         entry["successes"] = int(entry["successes"]) + 1
         entry["consecutive_failures"] = 0
@@ -701,7 +964,13 @@ def update_route_observation(
         if classification == "healthy":
             entry["openai_status"] = "healthy"
         elif entry.get("openai_status") != "healthy":
-            entry["openai_status"] = "degraded"
+            entry["openai_status"] = "browser_ambiguous"
+        entry["eligibility_state"] = "ready"
+        # 重试恢复仍是一次可用的完整路径样本；候选提交还需要至少一个
+        # retry-free 深度样本，并在接管时通过更严格的在线门槛。
+        entry["candidate_eligible"] = candidate_eligible
+        if entry["candidate_eligible"]:
+            entry["candidate_verified_at"] = timestamp
         latency = result.get("median_ms")
         if isinstance(latency, int) and latency > 0:
             values = [
@@ -716,9 +985,30 @@ def update_route_observation(
         entry["failures"] = int(entry["failures"]) + 1
         entry["consecutive_failures"] = int(entry["consecutive_failures"]) + 1
         entry["last_failure_at"] = timestamp
-        entry["openai_status"] = "unavailable"
+        entry["candidate_eligible"] = False
+        if int(entry["consecutive_failures"]) >= 2:
+            entry["openai_status"] = "unavailable"
+            entry["eligibility_state"] = "unavailable"
+        else:
+            entry["openai_status"] = "suspect"
+            entry["eligibility_state"] = "suspect"
+    else:
+        entry["candidate_eligible"] = False
+        entry["eligibility_state"] = "suspect"
     if deep:
         entry["deep_verified_at"] = timestamp
+        entry["last_full_probe_at"] = timestamp
+        samples = [item for item in entry.get("candidate_samples", []) if isinstance(item, dict)]
+        samples.append(
+            {
+                "time": timestamp,
+                "eligible": candidate_eligible,
+                "retry_free": retry_free,
+                "classification": classification,
+                "source": clean_text(source, 40),
+            }
+        )
+        entry["candidate_samples"] = samples[-12:]
 
 
 def record_preflight(
@@ -733,10 +1023,33 @@ def record_preflight(
     entry["preflight_ok"] = bool(ok)
     entry["preflight_checked_at"] = timestamp
     entry["preflight_latency_ms"] = latency_ms
-    if ok and entry.get("needs_recovery") and timestamp >= int(entry.get("cooldown_until", 0)):
-        entry["recovery_successes"] = int(entry.get("recovery_successes", 0)) + 1
-        if entry["recovery_successes"] >= int(config["recovery_successes_required"]):
-            entry["needs_recovery"] = False
+    # 浅层 /delay 只做低成本粗筛，不能证明完整 OpenAI 路径恢复。
+    del config
+
+
+def candidate_has_required_samples(
+    entry: dict[str, Any],
+    config: dict[str, Any],
+    timestamp: int,
+) -> bool:
+    window_start = timestamp - int(config["candidate_validation_window_seconds"])
+    samples = [
+        item
+        for item in entry.get("candidate_samples", [])
+        if isinstance(item, dict)
+        and bool(item.get("eligible"))
+        and int(item.get("time", 0)) >= window_start
+    ]
+    required = int(config["candidate_validation_samples_required"])
+    if len(samples) < required:
+        return False
+    selected = samples[-required:]
+    minimum_gap = int(config["candidate_validation_min_gap_seconds"])
+    if int(selected[-1]["time"]) - int(selected[0]["time"]) < minimum_gap:
+        return False
+    return any(item.get("retry_free") is True for item in selected) and int(
+        selected[-1]["time"]
+    ) >= timestamp - int(config["candidate_validation_fresh_seconds"])
 
 
 def quarantine_node(
@@ -791,12 +1104,41 @@ def refresh_catalog(
     state: dict[str, Any], config: dict[str, Any], timestamp: int
 ) -> dict[str, str]:
     catalog = load_real_nodes(config)
+    signature = runtime_probe_stack_signature(config)
+    previous_signature = state["inventory"].get("probe_stack_signature")
+    if previous_signature and signature and previous_signature != signature:
+        for entry in state["nodes"].values():
+            entry["candidate_eligible"] = False
+            entry["candidate_verified_at"] = 0
+            entry["candidate_samples"] = []
+            entry["eligibility_state"] = "revalidation_required"
+            entry["probe_stack_signature"] = None
+    state["inventory"]["probe_stack_signature"] = signature
     for name, protocol in catalog.items():
         ensure_node(state, name, protocol)
     for name in list(state["nodes"]):
         state["nodes"][name]["present_in_subscription"] = name in catalog
     state["inventory"]["catalog_refreshed_at"] = timestamp
     return catalog
+
+
+def runtime_probe_stack_signature(config: dict[str, Any]) -> str | None:
+    """对会改变真实探针路径的 IPv6、DNS 和 hosts 设置生成本地摘要。"""
+    try:
+        document = safe_yaml_load(
+            Path(config["clash_generated_config_path"]).read_text(encoding="utf-8")
+        )
+    except (OSError, yaml.YAMLError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    payload = {
+        "ipv6": bool(document.get("ipv6", False)),
+        "dns": document.get("dns", {}),
+        "hosts": document.get("hosts", {}),
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def catalog_from_state(state: dict[str, Any]) -> dict[str, str]:
@@ -807,9 +1149,21 @@ def catalog_from_state(state: dict[str, Any]) -> dict[str, str]:
     }
 
 
-def node_rank(entry: dict[str, Any], name: str) -> tuple[Any, ...]:
+def node_rank(
+    entry: dict[str, Any],
+    name: str,
+    timestamp: int | None = None,
+) -> tuple[Any, ...]:
+    checked_at = now_ts() if timestamp is None else timestamp
+    feedback_status = web_feedback_status(entry, checked_at)
     return (
         0 if entry.get("openai_status") == "healthy" else 1,
+        0
+        if feedback_status == WEB_FEEDBACK_CONFIRMED
+        else 2
+        if feedback_status == WEB_FEEDBACK_REJECTED
+        else 1,
+        -recent_candidate_success_rate(entry, checked_at),
         -success_rate(entry),
         -min(1000, int(entry.get("successes", 0)) + int(entry.get("failures", 0))),
         -int(entry.get("last_success_at", 0)),
@@ -819,7 +1173,9 @@ def node_rank(entry: dict[str, Any], name: str) -> tuple[Any, ...]:
 
 
 def pool_eligible(entry: dict[str, Any], config: dict[str, Any], timestamp: int) -> bool:
-    if entry.get("openai_status") not in {"healthy", "degraded"}:
+    if web_feedback_status(entry, timestamp) == WEB_FEEDBACK_REJECTED:
+        return False
+    if not entry.get("candidate_eligible"):
         return False
     if not entry.get("exit_ip"):
         return False
@@ -827,8 +1183,8 @@ def pool_eligible(entry: dict[str, Any], config: dict[str, Any], timestamp: int)
         return False
     if entry.get("needs_recovery"):
         return False
-    verified = int(entry.get("deep_verified_at", 0))
-    return verified >= timestamp - int(config["deep_verification_ttl_seconds"])
+    verified = int(entry.get("candidate_verified_at", 0))
+    return verified >= timestamp - int(config["warm_candidate_ttl_seconds"])
 
 
 def rebuild_pools(
@@ -847,32 +1203,38 @@ def rebuild_pools(
         exit_ip = str(entry["exit_ip"])
         duplicate_counts[exit_ip] = duplicate_counts.get(exit_ip, 0) + 1
         previous = representatives.get(exit_ip)
-        if previous is None or node_rank(entry, name) < node_rank(
-            state["nodes"][previous], previous
+        if previous is None or node_rank(entry, name, timestamp) < node_rank(
+            state["nodes"][previous], previous, timestamp
         ):
             representatives[exit_ip] = name
 
     candidates = list(representatives.values())
-    candidates.sort(key=lambda name: node_rank(state["nodes"][name], name))
+    candidates.sort(key=lambda name: node_rank(state["nodes"][name], name, timestamp))
+    active_cutoff = timestamp - int(config["active_candidate_ttl_seconds"])
+    active_candidates = [
+        name
+        for name in candidates
+        if int(state["nodes"][name].get("candidate_verified_at", 0)) >= active_cutoff
+    ]
     active_max = int(config["active_pool_max"])
     active: list[str] = []
     used_asn: set[str] = set()
     used_country: set[str] = set()
 
-    if current in candidates:
+    if current in active_candidates:
         active.append(str(current))
         entry = state["nodes"][str(current)]
         used_asn.add(str(entry.get("asn") or ""))
         used_country.add(str(entry.get("exit_country") or ""))
 
-    remaining = [name for name in candidates if name not in active]
+    remaining = [name for name in active_candidates if name not in active]
     while remaining and len(active) < active_max:
         selected = min(
             remaining,
             key=lambda name: (
                 1 if str(state["nodes"][name].get("asn") or "") in used_asn else 0,
                 1 if str(state["nodes"][name].get("exit_country") or "") in used_country else 0,
-                node_rank(state["nodes"][name], name),
+                node_rank(state["nodes"][name], name, timestamp),
             ),
         )
         remaining.remove(selected)
@@ -880,7 +1242,8 @@ def rebuild_pools(
         used_asn.add(str(state["nodes"][selected].get("asn") or ""))
         used_country.add(str(state["nodes"][selected].get("exit_country") or ""))
 
-    warm = remaining[: int(config["warm_pool_max"])]
+    warm_candidates = [name for name in candidates if name not in active]
+    warm = warm_candidates[: int(config["warm_pool_max"])]
     chosen = set(active) | set(warm)
     cold = [name for name in catalog if name not in chosen]
     state["pools"] = {
@@ -1004,12 +1367,14 @@ class IsolatedScanner:
         self.socket_path: str | None = None
         self.process: subprocess.Popen[Any] | None = None
         self.controller: ClashController | None = None
+        self.stack_signature: str | None = None
 
     def __enter__(self) -> IsolatedScanner:
         live_path = Path(self.config["clash_generated_config_path"])
         live = safe_yaml_load(live_path.read_text(encoding="utf-8"))
         if not isinstance(live, dict):
             raise ScannerError("runtime_config_invalid")
+        self.stack_signature = runtime_probe_stack_signature(self.config)
         wanted = set(self.nodes)
         proxies = [
             item
@@ -1019,6 +1384,12 @@ class IsolatedScanner:
         if not proxies:
             raise ScannerError("scanner_no_proxies")
 
+        dns_config = live.get("dns", {"enable": True, "ipv6": False})
+        if isinstance(dns_config, dict):
+            dns_config = dict(dns_config)
+            # 隔离扫描器不继承可能占用系统端口的 DNS 监听地址。
+            dns_config.pop("listen", None)
+
         self.temp_dir = tempfile.mkdtemp(prefix="mihomo-ai-pool-scan.")
         os.chmod(self.temp_dir, 0o700)
         self.socket_path = str(Path(self.temp_dir) / "ctl.sock")
@@ -1027,12 +1398,13 @@ class IsolatedScanner:
             "allow-lan": False,
             "mode": "rule",
             "log-level": "silent",
-            "ipv6": False,
+            "ipv6": bool(live.get("ipv6", False)),
             "external-controller": "",
             "external-controller-unix": self.socket_path,
             "secret": self.secret,
             "profile": {"store-selected": False},
-            "dns": live.get("dns", {"enable": True, "ipv6": False}),
+            "dns": dns_config,
+            "hosts": live.get("hosts", {}),
             "proxies": proxies,
             "proxy-groups": [
                 {
@@ -1106,7 +1478,12 @@ class IsolatedScanner:
             geo_future = executor.submit(geo_probe, proxy_url, self.config)
             route = route_future.result()
             geo = geo_future.result()
-        return {"node": node, "route": route, "geo": geo}
+        return {
+            "node": node,
+            "route": route,
+            "geo": geo,
+            "probe_stack_signature": self.stack_signature,
+        }
 
     def close(self) -> None:
         if self.process is not None and self.process.poll() is None:
@@ -1131,12 +1508,23 @@ def apply_deep_scan(
     state: dict[str, Any],
     result: dict[str, Any],
     timestamp: int,
+    config: dict[str, Any] | None = None,
+    source: str = "isolated",
 ) -> None:
     node = result["node"]
     route = result["route"]
     geo = result["geo"]
-    update_route_observation(state, node, route, timestamp, deep=True)
+    update_route_observation(
+        state,
+        node,
+        route,
+        timestamp,
+        deep=True,
+        source=source,
+    )
     entry = ensure_node(state, node)
+    if result.get("probe_stack_signature"):
+        entry["probe_stack_signature"] = result["probe_stack_signature"]
     if geo.get("ok"):
         for key in (
             "exit_ip",
@@ -1146,12 +1534,251 @@ def apply_deep_scan(
             "as_organization",
         ):
             entry[key] = geo.get(key)
+    if (
+        config is not None
+        and route.get("candidate_eligible")
+        and entry.get("needs_recovery")
+        and timestamp >= int(entry.get("cooldown_until", 0))
+    ):
+        entry["recovery_successes"] = int(entry.get("recovery_successes", 0)) + 1
+        if entry["recovery_successes"] >= int(config["recovery_successes_required"]):
+            entry["needs_recovery"] = False
+            entry["eligibility_state"] = "ready"
+
+
+def _candidate_has_prior_sample(
+    entry: dict[str, Any],
+    config: dict[str, Any],
+    timestamp: int,
+) -> bool:
+    earliest = timestamp - int(config["candidate_validation_window_seconds"])
+    latest = timestamp - int(config["candidate_validation_min_gap_seconds"])
+    return any(
+        isinstance(item, dict)
+        and bool(item.get("eligible"))
+        and item.get("retry_free") is True
+        and earliest <= int(item.get("time", 0)) <= latest
+        for item in entry.get("candidate_samples", [])
+    )
+
+
+def _isolated_candidate_rounds(
+    config: dict[str, Any],
+    node: str,
+    has_prior_sample: bool,
+) -> dict[str, Any]:
+    required = 1 if has_prior_sample else int(config["candidate_validation_samples_required"])
+    observations: list[dict[str, Any]] = []
+    try:
+        with IsolatedScanner(config, [node]) as scanner:
+            for index in range(required):
+                result = scanner.scan(node)
+                observations.append({"time": now_ts(), "result": result})
+                route = result["route"]
+                if not route.get("candidate_eligible"):
+                    break
+                if index + 1 < required:
+                    time.sleep(float(config["candidate_validation_min_gap_seconds"]))
+    except (ScannerError, ControllerError, OSError) as exc:
+        return {
+            "node": node,
+            "observations": observations,
+            "error": type(exc).__name__,
+        }
+    return {"node": node, "observations": observations, "error": None}
+
+
+def prepare_failover_candidates(
+    controller: ClashController,
+    state: dict[str, Any],
+    catalog: dict[str, str],
+    config: dict[str, Any],
+    log_path: Path,
+    old_node: str,
+    desired_count: int | None = None,
+) -> list[dict[str, Any]]:
+    """在不移动主 AI 组的情况下准备少量经过两轮验证的候选。"""
+    timestamp = now_ts()
+    rebuild_pools(state, catalog, config, timestamp, old_node)
+    monitor = state["monitor"]
+    episode = monitor.get("failover_episode")
+    attempted_nodes: set[str] = set()
+    attempted_exits: set[str] = set()
+    if isinstance(episode, dict):
+        attempted_nodes = {str(item) for item in episode.get("attempted_nodes", [])}
+        attempted_exits = {str(item) for item in episode.get("attempted_exits", []) if item}
+
+    prepared: list[dict[str, Any]] = []
+    old_exit = str(state["nodes"].get(old_node, {}).get("exit_ip") or "")
+    for item in monitor.get("prepared_candidates", []):
+        if not isinstance(item, dict):
+            continue
+        node = str(item.get("node") or "")
+        entry = state["nodes"].get(node, {})
+        candidate_exit = str(entry.get("exit_ip") or "")
+        if (
+            node
+            and node not in attempted_nodes
+            and candidate_exit
+            and (not old_exit or candidate_exit != old_exit)
+            and int(entry.get("cooldown_until", 0)) <= timestamp
+            and not entry.get("needs_recovery")
+            and web_feedback_status(entry, timestamp) != WEB_FEEDBACK_REJECTED
+            and timestamp - int(item.get("verified_at", 0))
+            <= int(config["candidate_validation_fresh_seconds"])
+            and candidate_has_required_samples(entry, config, timestamp)
+        ):
+            prepared.append(item)
+    target_count = int(
+        config["candidate_prepare_count"] if desired_count is None else desired_count
+    )
+    if len(prepared) >= target_count:
+        return prepared[:target_count]
+
+    layers = [
+        ("active", list(state["pools"].get("active", []))),
+        ("warm", list(state["pools"].get("warm", []))),
+        ("cold", list(state["pools"].get("cold", []))),
+    ]
+    layer_by_node: dict[str, str] = {}
+    candidates: list[str] = []
+    seen_exits: set[str] = set(attempted_exits)
+    for layer, nodes in layers:
+        for node in candidate_order(state, nodes, old_node, timestamp):
+            entry = state["nodes"].get(node, {})
+            exit_ip = str(entry.get("exit_ip") or "")
+            if (
+                node == old_node
+                or node in attempted_nodes
+                or int(entry.get("cooldown_until", 0)) > timestamp
+                or entry.get("needs_recovery")
+                or web_feedback_status(entry, timestamp) == WEB_FEEDBACK_REJECTED
+                or (exit_ip and exit_ip in seen_exits)
+            ):
+                continue
+            candidates.append(node)
+            layer_by_node[node] = layer
+            if exit_ip:
+                seen_exits.add(exit_ip)
+            if len(candidates) >= int(config["candidate_prefilter_limit"]):
+                break
+        if len(candidates) >= int(config["candidate_prefilter_limit"]):
+            break
+
+    if not candidates:
+        monitor["prepared_candidates"] = prepared
+        return prepared
+
+    log_event(
+        log_path,
+        "candidate_preparation_started",
+        old_node=old_node,
+        sampled=len(candidates),
+    )
+    preflight_fresh_seconds = max(
+        int(config["active_preflight_interval_seconds"]) * 2,
+        int(config["candidate_validation_fresh_seconds"]),
+    )
+    fresh_passing = [
+        node
+        for node in candidates
+        if state["nodes"].get(node, {}).get("preflight_ok")
+        and timestamp - int(state["nodes"].get(node, {}).get("preflight_checked_at", 0))
+        <= preflight_fresh_seconds
+    ]
+    batch_size = int(config["candidate_prefilter_batch_size"])
+    if attempted_nodes:
+        batch_size *= 2
+    needed = max(0, target_count - len(prepared))
+    to_check = (
+        []
+        if len(fresh_passing) >= needed
+        else [node for node in candidates if node not in fresh_passing][:batch_size]
+    )
+    preflight = preflight_nodes(controller, to_check, config)
+    checked_at = now_ts()
+    for item in preflight:
+        record_preflight(
+            state,
+            item["node"],
+            bool(item["ok"]),
+            item["latency_ms"],
+            checked_at,
+            config,
+        )
+        if not item["ok"]:
+            record_episode_attempt(state, item["node"])
+    passing = fresh_passing + [item["node"] for item in preflight if item["ok"]]
+    ordered = candidate_order(state, passing, old_node, checked_at)
+    wanted = [node for node in ordered if node not in {str(item.get("node")) for item in prepared}][
+        : max(0, target_count - len(prepared))
+    ]
+    if not wanted:
+        monitor["prepared_candidates"] = prepared
+        return prepared
+
+    workers = min(int(config["candidate_isolated_parallelism"]), len(wanted))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, workers)) as executor:
+        futures = {
+            node: executor.submit(
+                _isolated_candidate_rounds,
+                config,
+                node,
+                _candidate_has_prior_sample(state["nodes"].get(node, {}), config, checked_at),
+            )
+            for node in wanted
+        }
+        results = [futures[node].result() for node in wanted]
+
+    for result in results:
+        node = result["node"]
+        for observation in result["observations"]:
+            apply_deep_scan(
+                state,
+                observation["result"],
+                int(observation["time"]),
+                config,
+                source="candidate_preflight",
+            )
+        entry = state["nodes"].get(node, {})
+        verified_at = int(entry.get("candidate_verified_at", 0))
+        candidate_exit = str(entry.get("exit_ip") or "")
+        ready = result.get("error") is None and candidate_has_required_samples(
+            entry, config, now_ts()
+        )
+        ready = ready and bool(candidate_exit) and (not old_exit or candidate_exit != old_exit)
+        log_event(
+            log_path,
+            "candidate_preparation_result",
+            node=node,
+            layer=layer_by_node.get(node, "cold"),
+            ready=ready,
+            classification=entry.get("last_observation"),
+            error=result.get("error"),
+        )
+        if ready:
+            prepared.append(
+                {
+                    "node": node,
+                    "layer": layer_by_node.get(node, "cold"),
+                    "verified_at": verified_at,
+                    "classification": entry.get("last_observation"),
+                }
+            )
+        else:
+            record_episode_attempt(state, node)
+
+    monitor["prepared_candidates"] = prepared[:target_count]
+    rebuild_pools(state, catalog, config, now_ts(), old_node)
+    return list(monitor["prepared_candidates"])
 
 
 def public_route_result(result: dict[str, Any]) -> dict[str, Any]:
     return {
         "classification": result.get("classification"),
         "usable": result.get("usable"),
+        "candidate_eligible": result.get("candidate_eligible"),
+        "recovered_hard_targets": result.get("recovered_hard_targets", []),
         "hard_reasons": result.get("hard_reasons", []),
         "soft_reasons": result.get("soft_reasons", []),
         "median_ms": result.get("median_ms"),
@@ -1180,21 +1807,39 @@ def candidate_order(
     state: dict[str, Any],
     candidates: Sequence[str],
     current: str,
+    timestamp: int | None = None,
 ) -> list[str]:
+    checked_at = now_ts() if timestamp is None else timestamp
     current_entry = state["nodes"].get(current, {})
     current_ip = str(current_entry.get("exit_ip") or "")
     current_asn = str(current_entry.get("asn") or "")
 
     def key(name: str) -> tuple[Any, ...]:
         entry = state["nodes"].get(name, {})
+        feedback = web_feedback_status(entry, checked_at)
         return (
             0 if entry.get("preflight_ok") else 1,
+            0 if entry.get("openai_status") == "healthy" else 1,
+            0
+            if feedback == WEB_FEEDBACK_CONFIRMED
+            else 2
+            if feedback == WEB_FEEDBACK_REJECTED
+            else 1,
+            -recent_candidate_success_rate(entry, checked_at),
             0 if str(entry.get("exit_ip") or "") != current_ip else 1,
             0 if str(entry.get("asn") or "") != current_asn else 1,
-            node_rank(entry, name),
+            -success_rate(entry),
+            -int(entry.get("last_success_at", 0)),
+            int(entry.get("median_ms") or 999999),
+            name,
         )
 
-    ordered = sorted(set(candidates), key=key)
+    eligible = {
+        name
+        for name in candidates
+        if web_feedback_status(state["nodes"].get(name, {}), checked_at) != WEB_FEEDBACK_REJECTED
+    }
+    ordered = sorted(eligible, key=key)
     result: list[str] = []
     seen_exit_ips = set()
     for name in ordered:
@@ -1227,6 +1872,50 @@ def record_switch(
     state["monitor"]["expected_selection"] = new_node
 
 
+def ensure_failover_episode(
+    state: dict[str, Any],
+    current: str,
+    timestamp: int,
+) -> dict[str, Any]:
+    monitor = state["monitor"]
+    episode = monitor.get("failover_episode")
+    if not isinstance(episode, dict) or episode.get("phase") == "complete":
+        episode = {
+            "id": f"{timestamp}-{abs(hash(current)) % 100000}",
+            "started_at": timestamp,
+            "old_node": current,
+            "phase": "confirming",
+            "attempted_nodes": [],
+            "attempted_exits": [],
+        }
+        monitor["failover_episode"] = episode
+    return episode
+
+
+def record_episode_attempt(state: dict[str, Any], node: str) -> None:
+    episode = state["monitor"].get("failover_episode")
+    if not isinstance(episode, dict):
+        return
+    attempted = [str(item) for item in episode.get("attempted_nodes", [])]
+    if node not in attempted:
+        attempted.append(node)
+    episode["attempted_nodes"] = attempted
+    exit_ip = str(state["nodes"].get(node, {}).get("exit_ip") or "")
+    exits = [str(item) for item in episode.get("attempted_exits", []) if item]
+    if exit_ip and exit_ip not in exits:
+        exits.append(exit_ip)
+    episode["attempted_exits"] = exits
+
+
+def clear_failure_confirmation(monitor: dict[str, Any]) -> None:
+    monitor["consecutive_hard_failures"] = 0
+    monitor["hard_failure_streaks"] = {}
+    monitor["last_hard_failure_at"] = 0
+    monitor["first_failure_at"] = 0
+    monitor["failure_reasons"] = []
+    monitor["prepared_candidates"] = []
+
+
 def failover(
     controller: ClashController,
     state: dict[str, Any],
@@ -1237,123 +1926,155 @@ def failover(
     reason: str,
 ) -> dict[str, Any]:
     timestamp = now_ts()
-    rebuild_pools(state, catalog, config, timestamp, old_node)
+    episode = ensure_failover_episode(state, old_node, timestamp)
+    episode["phase"] = "switching"
     attempted: list[str] = []
-    selected_layers: list[str] = []
     suffixes = tuple(config.get("ai_domain_suffixes", DEFAULT_AI_SUFFIXES))
     max_attempts = int(config["max_candidate_attempts_per_failover"])
-
-    layers = [
-        ("active", list(state["pools"]["active"])),
-        ("warm", list(state["pools"]["warm"])),
-        ("cold", list(state["pools"]["cold"])),
-    ]
-    eligible_layers = [
-        (
-            layer_name,
-            [
-                node
-                for node in layer_nodes
-                if node != old_node
-                and int(state["nodes"].get(node, {}).get("cooldown_until", 0)) <= timestamp
-            ],
-        )
-        for layer_name, layer_nodes in layers
-    ]
-    remaining_attempts = max_attempts
+    prepared = prepare_failover_candidates(
+        controller,
+        state,
+        catalog,
+        config,
+        log_path,
+        old_node,
+        desired_count=max_attempts,
+    )
     last_selected = old_node
-    budget_exhausted = False
-
-    for layer_index, (layer_name, layer_nodes) in enumerate(eligible_layers):
-        if not layer_nodes:
-            continue
-        if remaining_attempts <= 0:
-            budget_exhausted = True
+    selected_attempts = 0
+    for item in prepared:
+        if selected_attempts >= max_attempts:
             break
-        preflight = preflight_nodes(controller, layer_nodes, config)
-        checked_at = now_ts()
-        for item in preflight:
-            record_preflight(
-                state,
-                item["node"],
-                bool(item["ok"]),
-                item["latency_ms"],
-                checked_at,
-                config,
-            )
-        passing = [item["node"] for item in preflight if item["ok"]]
-        ordered = candidate_order(state, passing, old_node)
-        if ordered:
-            selected_layers.append(layer_name)
-        if len(ordered) > remaining_attempts:
-            budget_exhausted = True
-
-        for candidate in ordered:
-            if remaining_attempts <= 0:
-                break
-            remaining_attempts -= 1
-            attempted.append(candidate)
-            try:
-                controller.select(config["group_name"], candidate)
-                last_selected = candidate
-                state["monitor"]["expected_selection"] = candidate
-            except ControllerError:
-                quarantine_node(state, candidate, config, now_ts())
-                continue
-
-            time.sleep(float(config["switch_connection_wait_seconds"]))
-            closed = controller.close_old_ai_connections(old_node, suffixes)
-            verification = route_probe(config["mixed_proxy_url"], config)
-            verified_at = now_ts()
-            update_route_observation(state, candidate, verification, verified_at, deep=False)
-            if verification.get("usable"):
-                quarantine_node(state, old_node, config, verified_at)
-                record_switch(state, old_node, candidate, reason, verified_at)
-                monitor = state["monitor"]
-                monitor["last_seen_node"] = candidate
-                monitor["consecutive_hard_failures"] = 0
-                monitor["hard_failure_streaks"] = {}
-                monitor["first_failure_at"] = 0
-                monitor["failure_reasons"] = []
-                monitor["last_status"] = "healthy"
-                clear_all_unavailable(state)
-                rebuild_pools(state, catalog, config, verified_at, candidate)
-                log_event(
-                    log_path,
-                    "switch_success",
-                    old_node=old_node,
-                    new_node=candidate,
-                    reason=reason,
-                    layer=layer_name,
-                    closed_connections=closed,
-                    verification=verification["classification"],
-                )
-                notify(
-                    "OpenAI 代理已切换",
-                    f"{old_node} → {candidate}；原因：{reason}",
-                )
-                return {
-                    "ok": True,
-                    "old_node": old_node,
-                    "new_node": candidate,
-                    "layer": layer_name,
-                    "closed_connections": closed,
-                    "verification": public_route_result(verification),
-                }
-
-            quarantine_node(state, candidate, config, verified_at)
+        candidate = str(item["node"])
+        layer_name = str(item.get("layer") or "cold")
+        attempted.append(candidate)
+        record_episode_attempt(state, candidate)
+        commit_delay = controller.delay(
+            candidate,
+            config["candidate_preflight_url"],
+            int(config["candidate_commit_preflight_timeout_ms"]),
+            str(config["candidate_preflight_expected_status"]),
+        )
+        record_preflight(
+            state,
+            candidate,
+            commit_delay is not None,
+            commit_delay,
+            now_ts(),
+            config,
+        )
+        if commit_delay is None:
+            quarantine_node(state, candidate, config, now_ts())
             log_event(
                 log_path,
-                "candidate_verification_failed",
+                "candidate_commit_preflight_failed",
+                episode_id=episode["id"],
                 candidate=candidate,
                 layer=layer_name,
-                reasons=verification.get("hard_reasons", [])
-                or verification.get("soft_reasons", []),
             )
-        if remaining_attempts <= 0:
-            if any(nodes for _, nodes in eligible_layers[layer_index + 1 :]):
-                budget_exhausted = True
-            break
+            continue
+        try:
+            controller.select(config["group_name"], candidate)
+            selected_attempts += 1
+            last_selected = candidate
+            state["monitor"]["expected_selection"] = candidate
+        except ControllerError:
+            quarantine_node(state, candidate, config, now_ts())
+            continue
+
+        time.sleep(float(config["switch_connection_wait_seconds"]))
+        verification = route_probe(config["mixed_proxy_url"], config)
+        verified_at = now_ts()
+        update_route_observation(
+            state,
+            candidate,
+            verification,
+            verified_at,
+            deep=True,
+            source="live_verification",
+        )
+        initial_recovered_targets = list(verification.get("recovered_hard_targets", []))
+        if verification.get("candidate_eligible") and initial_recovered_targets:
+            log_event(
+                log_path,
+                "candidate_reverification_required",
+                episode_id=episode["id"],
+                candidate=candidate,
+                layer=layer_name,
+                recovered_hard_targets=initial_recovered_targets,
+            )
+            time.sleep(float(config["candidate_reverification_delay_seconds"]))
+            verification = route_probe(config["mixed_proxy_url"], config)
+            verified_at = now_ts()
+            update_route_observation(
+                state,
+                candidate,
+                verification,
+                verified_at,
+                deep=True,
+                source="live_reverification",
+            )
+        clean_verification = bool(verification.get("candidate_eligible")) and not bool(
+            verification.get("recovered_hard_targets")
+        )
+        if clean_verification:
+            quarantine_node(state, old_node, config, verified_at)
+            record_switch(state, old_node, candidate, reason, verified_at)
+            monitor = state["monitor"]
+            monitor["last_seen_node"] = candidate
+            clear_failure_confirmation(monitor)
+            monitor["last_status"] = verification["classification"]
+            monitor["last_healthy_at"] = verified_at
+            monitor["probation_until"] = verified_at + int(config["probation_seconds"])
+            monitor["probation_node"] = candidate
+            monitor["probation_failures"] = 0
+            episode["phase"] = "probation"
+            episode["new_node"] = candidate
+            clear_all_unavailable(state)
+            closed = controller.close_stale_ai_connections(candidate, suffixes)
+            rebuild_pools(state, catalog, config, verified_at, candidate)
+            log_event(
+                log_path,
+                "switch_success",
+                episode_id=episode["id"],
+                old_node=old_node,
+                new_node=candidate,
+                reason=reason,
+                layer=layer_name,
+                closed_connections=closed,
+                verification=verification["classification"],
+                probation_until=monitor["probation_until"],
+            )
+            notify(
+                "OpenAI 代理已切换",
+                f"{old_node} → {candidate}；原因：{reason}",
+            )
+            return {
+                "ok": True,
+                "old_node": old_node,
+                "new_node": candidate,
+                "layer": layer_name,
+                "closed_connections": closed,
+                "verification": public_route_result(verification),
+            }
+
+        quarantine_node(state, candidate, config, verified_at)
+        log_event(
+            log_path,
+            "candidate_verification_failed",
+            episode_id=episode["id"],
+            candidate=candidate,
+            layer=layer_name,
+            reasons=verification.get("hard_reasons", []) or verification.get("soft_reasons", []),
+            recovered_hard_targets=verification.get("recovered_hard_targets", []),
+            initial_recovered_hard_targets=initial_recovered_targets,
+        )
+        try:
+            controller.select(config["group_name"], old_node)
+            state["monitor"]["expected_selection"] = old_node
+            last_selected = old_node
+        except ControllerError:
+            pass
 
     if last_selected != old_node:
         try:
@@ -1362,34 +2083,50 @@ def failover(
         except ControllerError:
             pass
 
-    if budget_exhausted:
+    episode_attempted = {str(item) for item in episode.get("attempted_nodes", [])}
+    episode_exits = {str(item) for item in episode.get("attempted_exits", []) if item}
+    remaining = []
+    for node in catalog:
+        if node == old_node or node in episode_attempted:
+            continue
+        entry = state["nodes"].get(node, {})
+        exit_ip = str(entry.get("exit_ip") or "")
+        if exit_ip and exit_ip in episode_exits:
+            continue
+        if web_feedback_status(entry, now_ts()) == WEB_FEEDBACK_REJECTED:
+            continue
+        remaining.append(node)
+
+    if remaining:
         monitor = state["monitor"]
         monitor["backoff_until"] = now_ts() + int(config["candidate_retry_backoff_seconds"])
         monitor["last_status"] = "candidate_retry_backoff"
+        episode["phase"] = "searching"
         log_event(
             log_path,
             "failover_attempt_budget_exhausted",
+            episode_id=episode["id"],
             old_node=old_node,
             attempted=attempted,
-            layers=selected_layers,
+            remaining=len(remaining),
             backoff_until=monitor["backoff_until"],
         )
         return {
             "ok": False,
-            "reason": "attempt_budget_exhausted",
+            "reason": "candidates_not_ready",
             "attempted": attempted,
-            "layers": selected_layers,
             "notified": False,
             "backoff_until": monitor["backoff_until"],
         }
 
     should_notify = mark_all_unavailable(state, config, now_ts())
+    episode["phase"] = "all_unavailable"
     log_event(
         log_path,
         "all_airport_unavailable",
         old_node=old_node,
         attempted=attempted,
-        layers=selected_layers,
+        episode_id=episode["id"],
         notified=should_notify,
     )
     if should_notify:
@@ -1398,7 +2135,6 @@ def failover(
         "ok": False,
         "reason": "all_unavailable",
         "attempted": attempted,
-        "layers": selected_layers,
         "notified": should_notify,
     }
 
@@ -1438,22 +2174,47 @@ def health_iteration(
                 new_node=current,
             )
             # 手动选择不消耗切换次数、不触发冷却。
-            monitor["consecutive_hard_failures"] = 0
-            monitor["hard_failure_streaks"] = {}
-            monitor["first_failure_at"] = 0
-            monitor["failure_reasons"] = []
+            clear_failure_confirmation(monitor)
+            monitor["failover_episode"] = None
+            monitor["probation_until"] = 0
+            monitor["probation_node"] = None
+            monitor["probation_failures"] = 0
     monitor["last_seen_node"] = current
     ensure_node(state, current, catalog.get(current, "unknown"))
 
     result = route_probe(config["mixed_proxy_url"], config)
+    if result.get("recovered_hard_targets"):
+        log_event(
+            log_path,
+            "hard_probe_retry_recovered",
+            targets=result["recovered_hard_targets"],
+        )
     update_route_observation(state, current, result, timestamp)
 
     if result.get("usable"):
-        monitor["consecutive_hard_failures"] = 0
-        monitor["hard_failure_streaks"] = {}
-        monitor["first_failure_at"] = 0
-        monitor["failure_reasons"] = []
+        clear_failure_confirmation(monitor)
         monitor["last_status"] = result["classification"]
+        monitor["last_healthy_at"] = timestamp
+        probation_active = (
+            monitor.get("probation_node") == current
+            and int(monitor.get("probation_until", 0)) > timestamp
+        )
+        if monitor.get("probation_node") == current and not probation_active:
+            episode = monitor.get("failover_episode")
+            if isinstance(episode, dict):
+                episode["phase"] = "complete"
+                log_event(
+                    log_path,
+                    "switch_probation_passed",
+                    episode_id=episode.get("id"),
+                    current=current,
+                )
+            monitor["failover_episode"] = None
+            monitor["probation_until"] = 0
+            monitor["probation_node"] = None
+            monitor["probation_failures"] = 0
+        elif not probation_active:
+            monitor["failover_episode"] = None
         clear_all_unavailable(state)
         rebuild_pools(state, catalog, config, timestamp, current)
         atomic_write_json(state_path, state)
@@ -1464,10 +2225,9 @@ def health_iteration(
         }
 
     if result["classification"] != "hard_failure":
-        monitor["consecutive_hard_failures"] = 0
-        monitor["hard_failure_streaks"] = {}
-        monitor["first_failure_at"] = 0
-        monitor["failure_reasons"] = []
+        clear_failure_confirmation(monitor)
+        if not int(monitor.get("probation_until", 0)):
+            monitor["failover_episode"] = None
         monitor["last_status"] = "soft_anomaly"
         log_event(
             log_path,
@@ -1485,10 +2245,9 @@ def health_iteration(
     direct = direct_network_probe(config)
     if not direct["ok"]:
         monitor["last_status"] = "local_network_down"
-        monitor["consecutive_hard_failures"] = 0
-        monitor["hard_failure_streaks"] = {}
-        monitor["first_failure_at"] = 0
-        monitor["failure_reasons"] = []
+        clear_failure_confirmation(monitor)
+        if not int(monitor.get("probation_until", 0)):
+            monitor["failover_episode"] = None
         log_event(log_path, "local_network_down", results=direct["results"])
         atomic_write_json(state_path, state)
         return {"status": "local_network_down", "direct": direct}
@@ -1497,21 +2256,22 @@ def health_iteration(
     previous_streaks = monitor.get("hard_failure_streaks", {})
     if not isinstance(previous_streaks, dict):
         previous_streaks = {}
-    all_targets = {
-        str(item.get("name")) for item in config.get("active_probes", []) if item.get("name")
+    monitor["hard_failure_streaks"] = {
+        target: int(previous_streaks.get(target, 0)) + 1 for target in hard_targets
     }
-    streaks = {
-        target: (int(previous_streaks.get(target, 0)) + 1 if target in hard_targets else 0)
-        for target in all_targets
-    }
-    monitor["hard_failure_streaks"] = streaks
-    failures = max(streaks.values(), default=0)
+    previous_failure_at = int(monitor.get("last_hard_failure_at", 0))
+    previous_failures = int(monitor.get("consecutive_hard_failures", 0))
+    minimum_gap = int(config["failure_confirmation_min_gap_seconds"])
+    if previous_failure_at and timestamp - previous_failure_at < minimum_gap:
+        failures = max(1, previous_failures)
+    else:
+        failures = previous_failures + 1 if previous_failures else 1
+        monitor["last_hard_failure_at"] = timestamp
     monitor["consecutive_hard_failures"] = failures
     if failures == 1:
         monitor["first_failure_at"] = timestamp
-        monitor["failure_reasons"] = list(result.get("hard_reasons", []))
-    else:
-        monitor["failure_reasons"] = list(result.get("hard_reasons", []))
+        ensure_failover_episode(state, current, timestamp)
+    monitor["failure_reasons"] = list(result.get("hard_reasons", []))
     monitor["last_status"] = "hard_failure"
     log_event(
         log_path,
@@ -1531,14 +2291,131 @@ def health_iteration(
 
     required = int(config["failure_rounds_before_switch"])
     if failures < required:
-        atomic_write_json(state_path, state)
-        return {
-            "status": "waiting_confirmation",
-            "current": current,
-            "consecutive_hard_failures": failures,
-            "required": required,
-            "route": public_route_result(result),
+        if not bool(config.get("parallel_failure_confirmation")) or required != 2:
+            prepare_failover_candidates(
+                controller,
+                state,
+                catalog,
+                config,
+                log_path,
+                current,
+            )
+            atomic_write_json(state_path, state)
+            return {
+                "status": "waiting_confirmation",
+                "current": current,
+                "consecutive_hard_failures": failures,
+                "required": required,
+                "route": public_route_result(result),
+            }
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            preparation = executor.submit(
+                prepare_failover_candidates,
+                controller,
+                state,
+                catalog,
+                config,
+                log_path,
+                current,
+            )
+            time.sleep(float(minimum_gap))
+            confirmation = route_probe(config["mixed_proxy_url"], config)
+            confirmation_direct = (
+                direct_network_probe(config)
+                if confirmation["classification"] == "hard_failure"
+                else None
+            )
+            try:
+                preparation.result()
+            except (ControllerError, ScannerError, OSError, yaml.YAMLError) as exc:
+                log_event(
+                    log_path,
+                    "candidate_preparation_failed",
+                    error=type(exc).__name__,
+                )
+
+        confirmation_timestamp = now_ts()
+        selected_after_confirmation, _ = current_group(controller, config["group_name"])
+        if selected_after_confirmation != current:
+            clear_failure_confirmation(monitor)
+            monitor["failover_episode"] = None
+            monitor["last_seen_node"] = selected_after_confirmation
+            monitor["last_status"] = "manual_selection_detected"
+            atomic_write_json(state_path, state)
+            return {
+                "status": "manual_selection_detected",
+                "current": selected_after_confirmation,
+            }
+
+        update_route_observation(
+            state,
+            current,
+            confirmation,
+            confirmation_timestamp,
+        )
+        if confirmation.get("usable"):
+            clear_failure_confirmation(monitor)
+            if not int(monitor.get("probation_until", 0)):
+                monitor["failover_episode"] = None
+            monitor["last_status"] = confirmation["classification"]
+            monitor["last_healthy_at"] = confirmation_timestamp
+            clear_all_unavailable(state)
+            rebuild_pools(state, catalog, config, confirmation_timestamp, current)
+            atomic_write_json(state_path, state)
+            return {
+                "status": confirmation["classification"],
+                "current": current,
+                "route": public_route_result(confirmation),
+            }
+        if confirmation["classification"] != "hard_failure":
+            clear_failure_confirmation(monitor)
+            if not int(monitor.get("probation_until", 0)):
+                monitor["failover_episode"] = None
+            monitor["last_status"] = "soft_anomaly"
+            log_event(
+                log_path,
+                "soft_anomaly",
+                current=current,
+                reasons=confirmation.get("soft_reasons", []),
+            )
+            atomic_write_json(state_path, state)
+            return {
+                "status": "soft_anomaly",
+                "current": current,
+                "route": public_route_result(confirmation),
+            }
+        if confirmation_direct is not None and not confirmation_direct["ok"]:
+            monitor["last_status"] = "local_network_down"
+            clear_failure_confirmation(monitor)
+            if not int(monitor.get("probation_until", 0)):
+                monitor["failover_episode"] = None
+            log_event(
+                log_path,
+                "local_network_down",
+                results=confirmation_direct["results"],
+            )
+            atomic_write_json(state_path, state)
+            return {"status": "local_network_down", "direct": confirmation_direct}
+
+        result = confirmation
+        timestamp = confirmation_timestamp
+        failures = 2
+        monitor["consecutive_hard_failures"] = failures
+        monitor["last_hard_failure_at"] = timestamp
+        monitor["hard_failure_streaks"] = {
+            target: int(monitor["hard_failure_streaks"].get(target, 0)) + 1
+            for target in {item.split(":", 1)[0] for item in result.get("hard_reasons", [])}
         }
+        monitor["failure_reasons"] = list(result.get("hard_reasons", []))
+        monitor["last_status"] = "hard_failure"
+        log_event(
+            log_path,
+            "hard_failure",
+            current=current,
+            consecutive_failures=failures,
+            reasons=result.get("hard_reasons", []),
+        )
 
     reason_values = [item.split(":", 1)[-1] for item in monitor.get("failure_reasons", [])]
     reason_text = "连续两次硬故障"
@@ -1555,7 +2432,13 @@ def health_iteration(
     )
     atomic_write_json(state_path, state)
     return {
-        "status": "switched" if outcome["ok"] else "all_unavailable",
+        "status": (
+            "switched"
+            if outcome["ok"]
+            else "all_unavailable"
+            if outcome.get("reason") == "all_unavailable"
+            else "candidate_retry_backoff"
+        ),
         "result": outcome,
     }
 
@@ -1580,6 +2463,8 @@ class MaintenanceWorker(threading.Thread):
         self.last_active_sweep = 0
         timestamp = now_ts()
         inventory = state.get("inventory", {})
+        self.last_active_full_scan = int(inventory.get("active_full_scanned_at", 0) or timestamp)
+        self.last_refill_scan = 0
         self.last_warm_scan = int(inventory.get("warm_scanned_at", 0) or timestamp)
         self.last_cold_scan = int(inventory.get("cold_scanned_at", 0) or timestamp)
         self.last_catalog_refresh = int(inventory.get("catalog_refreshed_at", 0) or timestamp)
@@ -1630,7 +2515,13 @@ class MaintenanceWorker(threading.Thread):
                     result = scanner.scan(node)
                     timestamp = now_ts()
                     with self.state_lock:
-                        apply_deep_scan(self.state, result, timestamp)
+                        apply_deep_scan(
+                            self.state,
+                            result,
+                            timestamp,
+                            self.config,
+                            source=f"maintenance_{label}",
+                        )
                         catalog = catalog_from_state(self.state)
                         current = self.state["monitor"].get("last_seen_node")
                         rebuild_pools(
@@ -1689,16 +2580,53 @@ class MaintenanceWorker(threading.Thread):
                         pass
                 self.last_catalog_refresh = timestamp
 
+            with self.state_lock:
+                monitor = self.state.get("monitor", {})
+                episode = monitor.get("failover_episode")
+                episode_phase = episode.get("phase") if isinstance(episode, dict) else None
+                maintenance_paused = bool(
+                    int(monitor.get("consecutive_hard_failures", 0))
+                    or int(monitor.get("probation_until", 0)) > timestamp
+                    or episode_phase in {"confirming", "switching", "searching"}
+                )
+            if maintenance_paused:
+                continue
+
             if timestamp - self.last_active_sweep >= int(
                 self.config["active_preflight_interval_seconds"]
             ):
-                nodes = self.snapshot_nodes("active")
+                nodes = self.snapshot_nodes(
+                    "active",
+                    int(self.config["active_preflight_batch_size"]),
+                )
                 results = preflight_nodes(controller, nodes, self.config)
                 self.apply_preflight(results)
                 self.last_active_sweep = now_ts()
 
+            if timestamp - self.last_active_full_scan >= int(
+                self.config["active_full_scan_interval_seconds"]
+            ):
+                count = int(self.config["active_full_scan_batch_size"])
+                self.deep_scan(self.snapshot_nodes("active", count), "active_full")
+                self.last_active_full_scan = now_ts()
+
+            with self.state_lock:
+                active_short = len(self.state["pools"].get("active", [])) < int(
+                    self.config["active_pool_min"]
+                )
+                warm_short = len(self.state["pools"].get("warm", [])) < int(
+                    self.config["warm_pool_min"]
+                )
+            if (active_short or warm_short) and timestamp - self.last_refill_scan >= int(
+                self.config["pool_refill_interval_seconds"]
+            ):
+                count = int(self.config["pool_refill_batch_size"])
+                self.deep_scan(self.snapshot_nodes("cold", count), "refill")
+                self.last_refill_scan = now_ts()
+
             if timestamp - self.last_warm_scan >= int(self.config["warm_scan_interval_seconds"]):
-                self.deep_scan(self.snapshot_nodes("warm", 1), "warm")
+                count = int(self.config["warm_scan_batch_size"])
+                self.deep_scan(self.snapshot_nodes("warm", count), "warm")
                 self.last_warm_scan = now_ts()
 
             if timestamp - self.last_cold_scan >= int(self.config["cold_scan_interval_seconds"]):
@@ -1725,6 +2653,7 @@ def command_status(config: dict[str, Any], state: dict[str, Any]) -> tuple[int, 
             "country": current_entry.get("exit_country"),
             "asn": current_entry.get("asn"),
             "status": current_entry.get("openai_status", "unknown"),
+            "web_feedback": web_feedback_status(current_entry, now_ts()),
         },
         "monitor": state["monitor"],
         "pools": {
@@ -1756,6 +2685,58 @@ def command_check(config: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         "direct": direct,
         "current": current,
         "route": public_route_result(result),
+    }
+
+
+def command_web_feedback(
+    config: dict[str, Any],
+    state: dict[str, Any],
+    state_path: Path,
+    log_path: Path,
+    node: str,
+    status: str,
+    reason: str,
+    ttl_seconds: int | None = None,
+) -> tuple[int, dict[str, Any]]:
+    timestamp = now_ts()
+    ttl_key = (
+        "web_feedback_confirmed_ttl_seconds"
+        if status == WEB_FEEDBACK_CONFIRMED
+        else "web_feedback_rejected_ttl_seconds"
+    )
+    ttl = int(config[ttl_key]) if ttl_seconds is None else int(ttl_seconds)
+    result = record_web_feedback(
+        state,
+        node,
+        status,
+        timestamp,
+        ttl,
+        reason,
+    )
+    catalog = catalog_from_state(state)
+    rebuild_pools(
+        state,
+        catalog,
+        config,
+        timestamp,
+        state["monitor"].get("last_seen_node"),
+    )
+    atomic_write_json(state_path, state)
+    log_event(
+        log_path,
+        "web_feedback_recorded",
+        node=node,
+        status=status,
+        reason=clean_text(reason, 120),
+        expires_at=result["expires_at"],
+        affected_nodes=len(result["affected_nodes"]),
+    )
+    return 0, {
+        "status": "recorded",
+        "node": node,
+        "web_feedback": status,
+        "expires_at": result["expires_at"],
+        "affected_nodes": len(result["affected_nodes"]),
     }
 
 
@@ -1803,7 +2784,13 @@ def command_inventory(
                 scanned += 1
                 if result["route"].get("usable"):
                     usable += 1
-                apply_deep_scan(state, result, now_ts())
+                apply_deep_scan(
+                    state,
+                    result,
+                    now_ts(),
+                    config,
+                    source="inventory",
+                )
                 rebuild_pools(state, catalog, config, now_ts(), current)
                 atomic_write_json(state_path, state)
                 pools = state["pools"]
@@ -1859,9 +2846,7 @@ def daemon_loop(
     signal.signal(signal.SIGINT, stop_handler)
     state_lock = threading.Lock()
     try:
-        catalog = catalog_from_state(state)
-        if not catalog:
-            catalog = refresh_catalog(state, config, now_ts())
+        catalog = refresh_catalog(state, config, now_ts())
         rebuild_pools(
             state,
             catalog,
@@ -1937,11 +2922,17 @@ def build_parser() -> argparse.ArgumentParser:
             "status",
             "check",
             "inventory",
+            "web-feedback",
         ),
         nargs="?",
         default="status",
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--node")
+    parser.add_argument("--web-status", choices=tuple(sorted(WEB_FEEDBACK_STATUSES)))
+    parser.add_argument("--reason", default="manual_browser_validation")
+    parser.add_argument("--ttl-seconds", type=int)
+    parser.add_argument("--confirm", default="")
     return parser
 
 
@@ -1971,9 +2962,36 @@ def main(argv: list[str] | None = None) -> int:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             print_output({"status": "already_running"})
-            return 0
+            return 2 if args.command == "web-feedback" else 0
 
-        if args.command == "inventory":
+        if args.command == "web-feedback":
+            if args.confirm != WEB_FEEDBACK_CONFIRMATION:
+                print_output(
+                    {
+                        "status": "confirmation_required",
+                        "confirmation": WEB_FEEDBACK_CONFIRMATION,
+                    }
+                )
+                return 2
+            if not args.node or not args.web_status:
+                print_output({"status": "node_and_web_status_required"})
+                return 2
+            try:
+                code, output = command_web_feedback(
+                    config,
+                    state,
+                    state_path,
+                    log_path,
+                    args.node,
+                    args.web_status,
+                    args.reason,
+                    args.ttl_seconds,
+                )
+            except ValueError as exc:
+                code, output = 2, {"status": str(exc)}
+            print_output(output)
+            return code
+        elif args.command == "inventory":
             try:
                 code, output = command_inventory(config, state, state_path, log_path)
             except (ControllerError, ScannerError, OSError, yaml.YAMLError) as exc:
@@ -1999,7 +3017,7 @@ def main(argv: list[str] | None = None) -> int:
                     state_path,
                     log_path,
                 )
-                code = 0 if output["status"] in {"healthy", "degraded", "switched"} else 2
+                code = 0 if output["status"] in {"healthy", "browser_ambiguous", "switched"} else 2
             except (ControllerError, OSError, yaml.YAMLError) as exc:
                 code, output = (
                     2,

@@ -33,19 +33,37 @@ dedicated AI group is present.
 
 `simulate_failover` verifies without touching the live proxy:
 
-- two hard failures are required;
+- two aggregate hard-failure rounds are required;
 - default first-failure timing remains at most 30 seconds;
 - a different observed exit is preferred;
+- candidate preparation overlaps the confirmation window;
 - no live selection is changed.
 
 Unit tests additionally cover:
 
 - hard/soft response classification;
-- same-target failure streaks;
+- targeted retry that suppresses a transient single-request hard failure;
+- aggregate failure rounds across different critical targets and minimum-gap
+  enforcement;
+- candidate preparation concurrent with the second confirmation round;
 - local-network guard;
-- candidate ordering and duplicate-exit removal;
+- two-sample candidate eligibility, freshness, ordering, and duplicate-exit
+  removal;
 - cooldown and recovery;
-- targeted connection closure;
+- recovery that requires full-path scans rather than light delay probes;
+- transactional verification, rollback without connection closure, and
+  60-second probation;
+- two usable deep candidate samples with at least one retry-free sample;
+- mandatory retry-free follow-up when the first live acceptance round only
+  recovers after a hard-target retry;
+- just-in-time commit preflight that rejects a stale candidate before live
+  selection;
+- failed commit preflight that does not consume the bounded live-selection
+  budget;
+- bounded rotating maintenance and scan pause during a failover episode;
+- stale AI connection closure across all old chains while preserving ordinary
+  and already-correct connections;
+- IPv6/DNS/hosts probe-stack invalidation;
 - all-unavailable single notification and backoff;
 - persistent profile backup, rollback, conflicts, and path escape;
 - LaunchAgent generation without proxy environment leakage;
@@ -58,11 +76,17 @@ Only run this after a backup and explicit operator approval:
 1. Keep ordinary browsing or a non-AI download active.
 2. In the dedicated AI group, manually select a known non-working test node.
 3. Record the first verified hard failure time.
-4. Confirm the monitor does not switch after only one failure.
+4. Confirm the monitor does not switch after only one failure, while candidate
+   preparation begins in the isolated scanner.
 5. Confirm it selects a verified distinct exit within 20-30 seconds of the
    first failure.
-6. Confirm only stale AI connections on the old chain are closed.
-7. Confirm ordinary traffic continues and no proactive switch-back occurs.
+6. Confirm the live-route verification passes before stale connections close.
+7. Confirm every stale AI connection not using the new node is closed, while
+   ordinary traffic and already-correct AI connections remain.
+8. Confirm the new node remains selected through the 60-second probation and
+   there is no proactive switch-back.
+9. Repeat with a candidate that passes isolated validation but fails the live
+   verification; confirm immediate rollback and zero connection closures.
 
 Do not stop the entire airport, expose the controller, or use Codex silence as
 the failure injection.
