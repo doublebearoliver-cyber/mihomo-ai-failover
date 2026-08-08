@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mihomo-ai-failover"
-version = "0.2.0"
-description = "Provider-scoped AI failover for Mihomo, with CLI and MCP adapters"
+version = "0.2.1"
+description = "Automatic ChatGPT, Codex, and AI proxy failover for Mihomo on macOS"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
@@ -13,11 +13,16 @@ authors = [{ name = "Oliver" }]
 keywords = [
   "mihomo",
   "clash-verge",
+  "clash-verge-rev",
   "openai",
   "chatgpt",
   "codex",
+  "workbuddy",
   "kimi",
   "minimax",
+  "mavis",
+  "agent-skills",
+  "network-resilience",
   "mcp",
   "failover",
 ]

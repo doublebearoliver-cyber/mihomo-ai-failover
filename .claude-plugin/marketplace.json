@@ -1,7 +1,7 @@
 {
   "name": "mihomo-ai-failover",
   "metadata": {
-    "description": "Provider-scoped AI failover tools for Mihomo on macOS."
+    "description": "Automatic ChatGPT, Codex, and multi-provider AI proxy failover for Mihomo on macOS."
   },
   "owner": {
     "name": "Oliver"
@@ -9,7 +9,7 @@
   "plugins": [
     {
       "name": "mihomo-ai-failover",
-      "description": "Diagnose and operate Provider-scoped AI failover for Mihomo on macOS.",
+      "description": "Diagnose AI connectivity and safely operate stable proxy failover with Clash Verge Rev and Mihomo.",
       "author": {
         "name": "Oliver"
       },

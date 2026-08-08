@@ -1,22 +1,24 @@
-# Mihomo AI Failover
+# Mihomo AI Failover — automatic proxy failover for ChatGPT and Codex
 
-Provider-scoped AI failover for Mihomo on macOS. It keeps a working selected
-node and switches only the affected Provider's dedicated proxy group after two
-consecutive, verified hard-failure rounds on that Provider's real path.
+Automatic, stability-first AI proxy failover for macOS with Clash Verge Rev
+and Mihomo. It diagnoses ChatGPT login/loading failures, Codex network errors,
+and stalled AI streams, keeps a working selected node, and switches only the
+affected Provider's dedicated proxy group after two consecutive, verified
+hard-failure rounds on that Provider's real path.
 
-> Version `0.2.0` is an early public preview for macOS, Clash Verge Rev, and
+> Version `0.2.1` is an early public preview for macOS, Clash Verge Rev, and
 > Mihomo. OpenAI is enabled by default. WorkBuddy (China), Kimi, MiniMax, and
 > Mavis remain disabled until their real local traffic is observed and
 > reviewed. The project never enables TUN automatically.
 
 [中文说明](README.zh-CN.md) ·
-[AI agent contract](plugins/mihomo-ai-failover/skills/openai-network-failover/SKILL.md) ·
+[AI agent contract](plugins/mihomo-ai-failover/skills/mihomo-ai-failover/SKILL.md) ·
 [Agent integration](docs/agent-integration.md) ·
 [Architecture](docs/architecture.md) ·
 [Validation](docs/validation.md)
 
 > **AI agents: read the
-> [`openai-network-failover` skill](plugins/mihomo-ai-failover/skills/openai-network-failover/SKILL.md)
+> [`mihomo-ai-failover` skill](plugins/mihomo-ai-failover/skills/mihomo-ai-failover/SKILL.md)
 > before using any MCP tool.** It is the canonical machine-facing contract for
 > supported environments, safety boundaries, tool order, stop conditions, and
 > result reporting. This README is not a substitute for that contract.
@@ -103,11 +105,30 @@ changes.
 
 ## Install
 
+Install the Agent Skill with the official `skills` CLI:
+
+```bash
+npx --yes skills@latest add doublebearoliver-cyber/mihomo-ai-failover \
+  --skill mihomo-ai-failover --agent codex --global --yes
+```
+
+If a client cannot discover a nested Skill from the repository shorthand, use
+the canonical Skill directory directly:
+
+```bash
+npx --yes skills@latest add \
+  https://github.com/doublebearoliver-cyber/mihomo-ai-failover/tree/main/plugins/mihomo-ai-failover/skills/mihomo-ai-failover \
+  --skill mihomo-ai-failover --agent codex --global --yes
+```
+
+The Skill supplies instructions and safety boundaries; it does not install the
+local CLI/MCP runtime. To diagnose or operate a Mac, install the runtime too.
+
 Install [`uv`](https://docs.astral.sh/uv/), then:
 
 ```bash
 uv tool install \
-  'mihomo-ai-failover[mcp] @ git+https://github.com/doublebearoliver-cyber/mihomo-ai-failover@v0.2.0'
+  'mihomo-ai-failover[mcp] @ git+https://github.com/doublebearoliver-cyber/mihomo-ai-failover@v0.2.1'
 ```
 
 Diagnose and preview before writing:
@@ -151,10 +172,9 @@ claude plugin marketplace add doublebearoliver-cyber/mihomo-ai-failover
 claude plugin install mihomo-ai-failover@mihomo-ai-failover
 ```
 
-Both plugins bundle the same `openai-network-failover` skill and local MCP
-server. The legacy skill name is retained for version-0.x compatibility. MCP
-mutations are disabled by default and require both local opt-in and an exact
-server-enforced confirmation.
+Both plugins bundle the same `mihomo-ai-failover` Skill and local MCP server.
+MCP mutations are disabled by default and require both local opt-in and an
+exact server-enforced confirmation.
 
 Agents without native plugin support can use the generic stdio MCP definition
 and load the same `SKILL.md` as instructions. The skill does not grant access to
@@ -207,7 +227,7 @@ not force that Provider into a failover group.
 After explicit authorization, write with
 `--confirm APPLY_PROVIDER_OVERLAY`, then separately preview/apply the
 persistent profile integration and restart Clash Verge when requested. See the
-[Provider adaptation contract](plugins/mihomo-ai-failover/skills/openai-network-failover/references/provider-adaptation.md).
+[Provider adaptation contract](plugins/mihomo-ai-failover/skills/mihomo-ai-failover/references/provider-adaptation.md).
 
 Disabling a Provider stops its state machine after the service restarts. To
 avoid deleting user-managed rules, previously installed persistent rules are

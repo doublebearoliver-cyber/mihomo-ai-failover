@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented here.
 
+## [0.2.1] - 2026-08-08
+
+### Changed
+
+- Renamed the canonical Agent Skill to `mihomo-ai-failover` so its directory,
+  frontmatter name, package, plugin, and repository share one searchable name.
+- Rewrote the Skill description and README opening around real user intents:
+  ChatGPT login/loading failures, Codex network errors, stalled streams, and
+  stable proxy failover for Clash Verge Rev and Mihomo.
+- Added official `skills` CLI installation commands, including a direct nested
+  Skill URL fallback, and clarified that the Skill does not silently install
+  or replace the local CLI/MCP runtime.
+- Added a pinned official-CLI discovery check to CI so future directory or
+  metadata changes cannot silently make the Skill undiscoverable.
+- Expanded package and plugin discovery keywords for supported AI providers and
+  network-resilience use cases.
+
+### Fixed
+
+- Removed stale `openai-network-failover` paths and version-compatibility text
+  that made repository and registry discovery inconsistent.
+- Added contract tests that keep the canonical Skill name, discoverable install
+  instructions, and plugin metadata synchronized.
+
 ## [0.2.0] - 2026-08-08
 
 ### Added
