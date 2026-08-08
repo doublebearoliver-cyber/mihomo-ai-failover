@@ -1,4 +1,4 @@
-config_version: 2
+config_version: 3
 
 # Paths normally auto-discovered on macOS. Override only when Clash Verge uses
 # a non-standard location.
@@ -10,8 +10,25 @@ mihomo_core_path: /Applications/Clash Verge.app/Contents/MacOS/verge-mihomo
 
 runtime_path: "~/Library/Application Support/Mihomo AI Failover"
 log_path: "~/Library/Logs/Mihomo AI Failover/monitor.jsonl"
+provider_overlay_path: "~/Library/Application Support/Mihomo AI Failover/providers.local.yaml"
 mixed_proxy_url: http://127.0.0.1:7897
 group_name: "🤖 AI稳定出口"
+
+# Public Provider templates are merged with these narrow switches. OpenAI is
+# enabled by default; all other profiles remain disabled until local discovery,
+# review, and an explicit private-overlay write.
+default_provider_id: openai
+providers:
+  openai:
+    enabled: true
+  workbuddy-cn:
+    enabled: false
+  kimi:
+    enabled: false
+  minimax:
+    enabled: false
+  mavis:
+    enabled: false
 
 monitor_interval_seconds: 10
 failure_rounds_before_switch: 2
@@ -23,7 +40,7 @@ switch_connection_wait_seconds: 3
 cooldown_first_seconds: 300
 recovery_successes_required: 3
 
-# Candidates need two fresh full OpenAI-path samples before live selection.
+# Candidates need two fresh full Provider-path samples before live selection.
 max_candidate_attempts_per_failover: 2
 candidate_prepare_count: 3
 candidate_isolated_parallelism: 3

@@ -23,11 +23,18 @@ mihomo-ai-failover status
 mihomo-ai-failover check
 mihomo-ai-failover profile-preview
 mihomo-ai-failover service-status
+mihomo-ai-failover providers-list
+mihomo-ai-failover provider-check --provider openai
 ```
 
 Verify that the generated Clash config is not listed as a write target, the
 controller uses a local Unix socket, the secret value is not printed, and the
 dedicated AI group is present.
+
+For a non-OpenAI Provider, run `provider-observe` only while the user is
+actively exercising that product. Observation is still read-only, but its
+hostname output is machine-specific and must not be pasted into issues or test
+fixtures.
 
 ## Isolated policy checks
 
@@ -68,21 +75,30 @@ Unit tests additionally cover:
 - persistent profile backup, rollback, conflicts, and path escape;
 - LaunchAgent generation without proxy environment leakage;
 - MCP annotations and mutation denial.
+- Provider schema validation and version-2-to-version-3 config migration;
+- independent Provider runtime/log paths and multi-group routing rules;
+- private overlay permission, guarded writes, and non-leakage when base config
+  is rewritten;
+- hostname-only discovery, process evidence, hidden temporal-only candidates,
+  and shared-infrastructure rejection;
+- serialized cross-Provider maintenance scans and isolated connection cleanup.
 
 ## Opt-in live failure exercise
 
 Only run this after a backup and explicit operator approval:
 
 1. Keep ordinary browsing or a non-AI download active.
-2. In the dedicated AI group, manually select a known non-working test node.
+2. Choose exactly one Provider and, in its dedicated group, manually select a
+   known non-working test node.
 3. Record the first verified hard failure time.
 4. Confirm the monitor does not switch after only one failure, while candidate
    preparation begins in the isolated scanner.
 5. Confirm it selects a verified distinct exit within 20-30 seconds of the
    first failure.
 6. Confirm the live-route verification passes before stale connections close.
-7. Confirm every stale AI connection not using the new node is closed, while
-   ordinary traffic and already-correct AI connections remain.
+7. Confirm only stale connections matching that Provider and not using the new
+   node are closed, while ordinary traffic, other Providers, and
+   already-correct connections remain.
 8. Confirm the new node remains selected through the 60-second probation and
    there is no proactive switch-back.
 9. Repeat with a candidate that passes isolated validation but fails the live

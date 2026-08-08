@@ -6,6 +6,7 @@ Clash Verge paths are discovered at runtime and remain overridable.
 
 from __future__ import annotations
 
+import copy
 import json
 import os
 import re
@@ -15,20 +16,25 @@ from typing import Any
 
 import yaml
 
+from .providers import (
+    DEFAULT_PROVIDER_ID,
+    OPENAI_DOMAIN_SUFFIXES,
+    ProviderError,
+    builtin_provider_templates,
+    load_provider_overlay,
+    merge_provider_overlay,
+    normalize_hostname,
+    normalize_providers,
+)
+
 APP_DIR_NAME = "Mihomo AI Failover"
 CLASH_VERGE_APP_ID = "io.github.clash-verge-rev.clash-verge-rev"
 DEFAULT_GROUP_NAME = "🤖 AI稳定出口"
 DEFAULT_SOCKET_PATH = "/tmp/verge/verge-mihomo.sock"
 DEFAULT_CONFIG_FILENAME = "config.yaml"
-CONFIG_VERSION = 2
+CONFIG_VERSION = 3
 
-DEFAULT_AI_SUFFIXES = [
-    "openai.com",
-    "chatgpt.com",
-    "oaistatic.com",
-    "oaiusercontent.com",
-    "oaistatsig.com",
-]
+DEFAULT_AI_SUFFIXES = list(OPENAI_DOMAIN_SUFFIXES)
 
 PATH_KEYS = {
     "clash_data_root",
@@ -38,6 +44,7 @@ PATH_KEYS = {
     "runtime_path",
     "log_path",
     "mihomo_core_path",
+    "provider_overlay_path",
 }
 
 
@@ -122,6 +129,8 @@ def default_config(
         socket_path = DEFAULT_SOCKET_PATH
     runtime = app_support_dir(home)
     log_dir = app_log_dir(home)
+    providers = normalize_providers(builtin_provider_templates())
+    openai = providers[DEFAULT_PROVIDER_ID]
 
     return {
         "config_version": CONFIG_VERSION,
@@ -131,10 +140,17 @@ def default_config(
         "clash_socket_path": socket_path,
         "runtime_path": str(runtime),
         "log_path": str(log_dir / "monitor.jsonl"),
+        "provider_overlay_path": str(runtime / "providers.local.yaml"),
+        "provider_overlay_loaded": False,
         "mixed_proxy_url": f"http://127.0.0.1:{mixed_port}",
-        "group_name": DEFAULT_GROUP_NAME,
+        "default_provider_id": DEFAULT_PROVIDER_ID,
+        "providers": providers,
+        "group_name": openai["group_name"],
         "mihomo_core_path": str(discover_mihomo_core()),
-        "ai_domain_suffixes": list(DEFAULT_AI_SUFFIXES),
+        "ai_domain_suffixes": list(openai["domain_suffixes"]),
+        "ai_exact_domains": list(openai["exact_domains"]),
+        "required_probe_names": list(openai["required_probe_names"]),
+        "browser_ambiguous_probe_names": list(openai["browser_ambiguous_probe_names"]),
         "node_exclude_regex": (
             r"(套餐|流量|到期|过期|剩余|官网|网址|更新|订阅|倍率|公告|"
             r"DIRECT|REJECT|PASS)"
@@ -162,8 +178,8 @@ def default_config(
         "warm_candidate_ttl_seconds": 21600,
         "web_feedback_confirmed_ttl_seconds": 604800,
         "web_feedback_rejected_ttl_seconds": 86400,
-        "candidate_preflight_url": "https://api.openai.com/v1/models",
-        "candidate_preflight_expected_status": "401",
+        "candidate_preflight_url": openai["candidate_preflight_url"],
+        "candidate_preflight_expected_status": openai["candidate_preflight_expected_status"],
         "candidate_preflight_timeout_ms": 4000,
         "candidate_commit_preflight_timeout_ms": 2000,
         "candidate_reverification_delay_seconds": 3,
@@ -208,36 +224,7 @@ def default_config(
                 "connect_timeout_seconds": 3,
             },
         ],
-        "active_probes": [
-            {
-                "name": "openai_api",
-                "kind": "openai_api",
-                "url": "https://api.openai.com/v1/models",
-                "timeout_seconds": 6,
-                "connect_timeout_seconds": 4,
-            },
-            {
-                "name": "openai_auth",
-                "kind": "openai_auth",
-                "url": "https://auth.openai.com/.well-known/openid-configuration",
-                "timeout_seconds": 6,
-                "connect_timeout_seconds": 4,
-            },
-            {
-                "name": "chatgpt_web",
-                "kind": "chatgpt_web",
-                "url": "https://chatgpt.com/",
-                "timeout_seconds": 6,
-                "connect_timeout_seconds": 4,
-            },
-            {
-                "name": "chatgpt_ws",
-                "kind": "chatgpt_ws",
-                "url": "https://ws.chatgpt.com/",
-                "timeout_seconds": 6,
-                "connect_timeout_seconds": 4,
-            },
-        ],
+        "active_probes": list(openai["active_probes"]),
     }
 
 
@@ -267,6 +254,44 @@ def normalize_config(
                 item for item in defaults["active_probes"] if str(item.get("name")) not in names
             )
             config["active_probes"] = merged
+    raw_providers = raw.get("providers") if raw else None
+    providers = normalize_providers(raw_providers)
+    openai_override: dict[str, Any] = {}
+    legacy_mapping = {
+        "group_name": "group_name",
+        "ai_domain_suffixes": "domain_suffixes",
+        "ai_exact_domains": "exact_domains",
+        "active_probes": "active_probes",
+        "required_probe_names": "required_probe_names",
+        "browser_ambiguous_probe_names": "browser_ambiguous_probe_names",
+        "candidate_preflight_url": "candidate_preflight_url",
+        "candidate_preflight_expected_status": "candidate_preflight_expected_status",
+    }
+    if raw:
+        for legacy_key, provider_key in legacy_mapping.items():
+            if legacy_key in raw:
+                openai_override[provider_key] = config[legacy_key]
+    if openai_override:
+        providers[DEFAULT_PROVIDER_ID].update(openai_override)
+        providers = normalize_providers(providers)
+    config["providers"] = providers
+    default_provider_id = str(config.get("default_provider_id") or DEFAULT_PROVIDER_ID)
+    if default_provider_id not in providers:
+        raise ConfigError("default_provider_unknown")
+    config["default_provider_id"] = default_provider_id
+    default_provider = providers[default_provider_id]
+    config["group_name"] = default_provider["group_name"]
+    config["ai_domain_suffixes"] = list(default_provider["domain_suffixes"])
+    config["ai_exact_domains"] = list(default_provider["exact_domains"])
+    config["active_probes"] = list(default_provider["active_probes"])
+    config["required_probe_names"] = list(default_provider["required_probe_names"])
+    config["browser_ambiguous_probe_names"] = list(
+        default_provider["browser_ambiguous_probe_names"]
+    )
+    config["candidate_preflight_url"] = default_provider["candidate_preflight_url"]
+    config["candidate_preflight_expected_status"] = default_provider[
+        "candidate_preflight_expected_status"
+    ]
     config["config_version"] = CONFIG_VERSION
     for key in PATH_KEYS:
         value = config.get(key)
@@ -282,19 +307,49 @@ def load_config(
     home: Path | None = None,
 ) -> dict[str, Any]:
     config_path = default_config_path(home) if path is None else Path(path)
+    raw: dict[str, Any] | None = None
     try:
         text = config_path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return normalize_config(None, home=home)
+        pass
     except OSError as exc:
         raise ConfigError(f"config_unreadable:{type(exc).__name__}") from exc
+    else:
+        try:
+            parsed = (
+                json.loads(text) if config_path.suffix.lower() == ".json" else yaml.safe_load(text)
+            )
+        except (json.JSONDecodeError, yaml.YAMLError) as exc:
+            raise ConfigError(f"config_invalid:{type(exc).__name__}") from exc
+        if not isinstance(parsed, dict):
+            raise ConfigError("config_root_must_be_mapping")
+        raw = parsed
+    config = normalize_config(raw, home=home)
+    # Retain the publishable/base profiles only in memory.  This lets a later
+    # config rewrite avoid copying private overlay domains into config.yaml.
+    config["_provider_base_profiles"] = copy.deepcopy(config["providers"])
+    overlay_path = Path(str(config["provider_overlay_path"]))
     try:
-        raw = json.loads(text) if config_path.suffix.lower() == ".json" else yaml.safe_load(text)
-    except (json.JSONDecodeError, yaml.YAMLError) as exc:
-        raise ConfigError(f"config_invalid:{type(exc).__name__}") from exc
-    if not isinstance(raw, dict):
-        raise ConfigError("config_root_must_be_mapping")
-    return normalize_config(raw, home=home)
+        overlay = load_provider_overlay(overlay_path)
+        config["providers"] = merge_provider_overlay(config["providers"], overlay)
+    except ProviderError as exc:
+        raise ConfigError(str(exc)) from exc
+    config["provider_overlay_loaded"] = overlay_path.is_file()
+    default_provider = config["providers"][config["default_provider_id"]]
+    config["group_name"] = default_provider["group_name"]
+    config["ai_domain_suffixes"] = list(default_provider["domain_suffixes"])
+    config["ai_exact_domains"] = list(default_provider["exact_domains"])
+    config["active_probes"] = list(default_provider["active_probes"])
+    config["required_probe_names"] = list(default_provider["required_probe_names"])
+    config["browser_ambiguous_probe_names"] = list(
+        default_provider["browser_ambiguous_probe_names"]
+    )
+    config["candidate_preflight_url"] = default_provider["candidate_preflight_url"]
+    config["candidate_preflight_expected_status"] = default_provider[
+        "candidate_preflight_expected_status"
+    ]
+    validate_config(config)
+    return config
 
 
 def validate_config(config: dict[str, Any]) -> None:
@@ -339,6 +394,23 @@ def validate_config(config: dict[str, Any]) -> None:
     for suffix in suffixes:
         if not isinstance(suffix, str) or "/" in suffix or "*" in suffix:
             raise ConfigError("invalid_ai_domain_suffix")
+    exact_domains = config.get("ai_exact_domains", [])
+    if not isinstance(exact_domains, list):
+        raise ConfigError("ai_exact_domains_must_be_list")
+    try:
+        for domain in exact_domains:
+            normalize_hostname(str(domain))
+        normalized_providers = normalize_providers(config.get("providers"))
+    except ProviderError as exc:
+        raise ConfigError(str(exc)) from exc
+    default_provider_id = str(config.get("default_provider_id") or "")
+    if default_provider_id not in normalized_providers:
+        raise ConfigError("default_provider_unknown")
+    enabled_count = sum(
+        1 for profile in normalized_providers.values() if bool(profile.get("enabled"))
+    )
+    if enabled_count > 8:
+        raise ConfigError("too_many_enabled_providers")
     proxy_url = str(config.get("mixed_proxy_url") or "")
     if not re.fullmatch(r"http://(?:127\.0\.0\.1|localhost):\d{1,5}", proxy_url):
         raise ConfigError("mixed_proxy_url_must_be_loopback_http")
@@ -364,7 +436,27 @@ def write_config(
     target = Path(path)
     if target.exists() and not overwrite:
         raise FileExistsError(target)
-    normalized = normalize_config(config)
+    serializable = dict(config)
+    base_profiles = serializable.pop("_provider_base_profiles", None)
+    serializable.pop("provider_overlay_loaded", None)
+    if isinstance(base_profiles, dict):
+        serializable["providers"] = copy.deepcopy(base_profiles)
+        # These fields mirror the selected Provider at runtime.  The base
+        # profiles already contain any intentional public customization.
+        for key in (
+            "group_name",
+            "ai_domain_suffixes",
+            "ai_exact_domains",
+            "active_probes",
+            "required_probe_names",
+            "browser_ambiguous_probe_names",
+            "candidate_preflight_url",
+            "candidate_preflight_expected_status",
+        ):
+            serializable.pop(key, None)
+    normalized = normalize_config(serializable)
+    normalized.pop("provider_overlay_loaded", None)
+    normalized.pop("_provider_base_profiles", None)
     target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     text = yaml.safe_dump(normalized, allow_unicode=True, sort_keys=False)
     temporary = target.with_name(f".{target.name}.tmp")

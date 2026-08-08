@@ -215,3 +215,51 @@ def test_rollback_rejects_mismatched_clash_root(tmp_path: Path) -> None:
             backup_path=applied["backup"],
             expected_clash_root=tmp_path / "different-clash-root",
         )
+
+
+def test_multiple_provider_groups_and_exact_rules_are_independent(tmp_path: Path) -> None:
+    clash_root = tmp_path / "clash"
+    _fixture_with_existing_enhancements(clash_root)
+    profiles = [
+        {
+            "id": "openai",
+            "group_name": "🤖 AI稳定出口",
+            "domain_suffixes": ["openai.com"],
+            "exact_domains": [],
+        },
+        {
+            "id": "kimi",
+            "group_name": "🤖 Kimi稳定出口",
+            "domain_suffixes": ["kimi.com"],
+            "exact_domains": ["stream.kimi-service.example"],
+        },
+    ]
+
+    preview = preview_profile_integration(clash_root, provider_profiles=profiles)
+
+    assert "add_provider_select_group:openai" in preview["changes"]
+    assert "add_provider_select_group:kimi" in preview["changes"]
+    assert "add_domain_suffix:openai:openai.com" in preview["changes"]
+    assert "add_domain_suffix:kimi:kimi.com" in preview["changes"]
+    assert "add_domain:kimi:stream.kimi-service.example" in preview["changes"]
+
+    apply_profile_integration(
+        clash_root,
+        tmp_path / "runtime",
+        confirmation=PROFILE_CONFIRMATION,
+        provider_profiles=profiles,
+    )
+    rules = yaml.safe_load(
+        (clash_root / "profiles" / "rules-existing.yaml").read_text(encoding="utf-8")
+    )
+    assert rules["prepend"][0] == ("DOMAIN,stream.kimi-service.example,🤖 Kimi稳定出口")
+
+
+def test_explicit_empty_provider_set_is_rejected_before_writes(tmp_path: Path) -> None:
+    clash_root = tmp_path / "clash"
+    originals = _fixture_with_existing_enhancements(clash_root)
+
+    with pytest.raises(ProfileIntegrationError, match="no_enabled_providers"):
+        preview_profile_integration(clash_root, provider_profiles=[])
+
+    assert (clash_root / "profiles.yaml").read_text(encoding="utf-8") == originals[0]

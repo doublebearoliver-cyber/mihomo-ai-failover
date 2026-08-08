@@ -1,7 +1,7 @@
-"""Mihomo 的 OpenAI 专用高可用监控。
+"""Mihomo 的多 AI Provider 专用高可用监控。
 
 设计边界：
-- 只切换“🤖 AI稳定出口”，不改变全局节点、系统代理或 TUN。
+- 只切换当前 Provider 的专用组，不改变全局节点、系统代理或 TUN。
 - 当前节点健康时绝不因延迟变化切换。
 - 只有连续两轮可验证硬故障才切换。
 - 节点凭据只从 Clash 运行时配置读入内存，不写入本项目状态或日志。
@@ -30,7 +30,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Sequence
-from contextlib import suppress
+from contextlib import ExitStack, suppress
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode, urlparse
@@ -44,6 +44,7 @@ from .config import (
 from .config import (
     load_config as load_public_config,
 )
+from .providers import ProviderError, enabled_provider_ids, resolve_provider_config
 
 DEFAULT_CONFIG = default_config_path()
 SCHEMA_VERSION = 3
@@ -52,6 +53,7 @@ GROUP_TYPES = {"Selector", "URLTest", "Fallback", "LoadBalance", "Compatible"}
 WEB_FEEDBACK_CONFIRMED = "confirmed"
 WEB_FEEDBACK_REJECTED = "rejected"
 WEB_FEEDBACK_STATUSES = {WEB_FEEDBACK_CONFIRMED, WEB_FEEDBACK_REJECTED}
+MAINTENANCE_SCAN_SEMAPHORE = threading.Semaphore(1)
 WEB_FEEDBACK_CONFIRMATION = "RECORD_WEB_FEEDBACK"
 
 
@@ -159,8 +161,9 @@ class ClashController:
         self,
         old_node: str,
         suffixes: Sequence[str],
+        exact_domains: Sequence[str] = (),
     ) -> int:
-        """只关闭仍绑定旧节点的 OpenAI 连接。"""
+        """只关闭仍绑定旧节点的当前 Provider 连接。"""
         try:
             result = self.request("GET", "/connections")
         except ControllerError:
@@ -169,7 +172,7 @@ class ClashController:
         for connection in result.get("connections", []):
             metadata = connection.get("metadata", {}) or {}
             host = str(metadata.get("host") or "").lower().rstrip(".")
-            if not host_matches_suffixes(host, suffixes):
+            if not host_matches_targets(host, suffixes, exact_domains):
                 continue
             chains = [str(item) for item in connection.get("chains", [])]
             if old_node not in chains:
@@ -191,6 +194,7 @@ class ClashController:
         self,
         new_node: str,
         suffixes: Sequence[str],
+        exact_domains: Sequence[str] = (),
     ) -> int:
         """关闭所有仍绑定非新节点的 AI 连接，保留普通网站和新链路。"""
         try:
@@ -201,7 +205,7 @@ class ClashController:
         for connection in result.get("connections", []):
             metadata = connection.get("metadata", {}) or {}
             host = str(metadata.get("host") or "").lower().rstrip(".")
-            if not host_matches_suffixes(host, suffixes):
+            if not host_matches_targets(host, suffixes, exact_domains):
                 continue
             chains = [str(item) for item in connection.get("chains", [])]
             if new_node in chains:
@@ -331,9 +335,65 @@ def notify(title: str, message: str) -> None:
         )
 
 
+def notify_all_unavailable_once(
+    config: dict[str, Any],
+    title: str,
+    timestamp: int | None = None,
+) -> bool:
+    """Deduplicate the airport-wide Toast across Provider state machines."""
+
+    shared_runtime = config.get("shared_runtime_path")
+    if not shared_runtime:
+        notify(title, "当前机场全部不可用")
+        return True
+    checked_at = now_ts() if timestamp is None else int(timestamp)
+    root = Path(str(shared_runtime))
+    lock_path = root / "all-unavailable-notification.lock"
+    state_path = root / "all-unavailable-notification.json"
+    try:
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with lock_path.open("a+", encoding="utf-8") as lock:
+            with suppress(OSError):
+                os.chmod(lock_path, 0o600)
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                record = json.loads(state_path.read_text(encoding="utf-8"))
+            except (FileNotFoundError, json.JSONDecodeError, OSError):
+                record = {}
+            last_notified_at = int(record.get("last_notified_at", 0) or 0)
+            gate_seconds = max(300, int(config["all_unavailable_backoff_seconds"]))
+            if checked_at - last_notified_at < gate_seconds:
+                return False
+            atomic_write_json(
+                state_path,
+                {
+                    "last_notified_at": checked_at,
+                    "provider_id": str(config.get("provider_id") or "openai"),
+                },
+            )
+    except OSError:
+        # The Provider episode itself still deduplicates notifications.  Do not
+        # hide a real outage merely because the cross-Provider gate is unwritable.
+        notify(title, "当前机场全部不可用")
+        return True
+    notify(title, "当前机场全部不可用")
+    return True
+
+
 def host_matches_suffixes(host: str, suffixes: Sequence[str]) -> bool:
     normalized = host.lower().rstrip(".")
     return any(normalized == suffix or normalized.endswith(f".{suffix}") for suffix in suffixes)
+
+
+def host_matches_targets(
+    host: str,
+    suffixes: Sequence[str],
+    exact_domains: Sequence[str] = (),
+) -> bool:
+    normalized = host.lower().rstrip(".")
+    return normalized in {item.lower().rstrip(".") for item in exact_domains} or (
+        host_matches_suffixes(normalized, suffixes)
+    )
 
 
 def error_kind(stderr: str, exit_code: int) -> str:
@@ -389,6 +449,7 @@ def classify_probe(
     body: bytes,
     exit_code: int,
     stderr: str,
+    probe: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
     """返回 verdict(healthy/soft/hard) 和脱敏原因。"""
     if exit_code != 0 or status == 0:
@@ -461,6 +522,48 @@ def classify_probe(
             return "soft", f"upstream_http_{status}"
         return "hard", f"unexpected_http_{status}"
 
+    if kind == "generic_web":
+        hard_statuses = {
+            int(value) for value in (probe or {}).get("hard_statuses", []) if str(value).isdigit()
+        }
+        hard_markers = [
+            str(value).lower()
+            for value in (probe or {}).get("hard_body_markers", [])
+            if str(value).strip()
+        ]
+        if status in hard_statuses:
+            return "hard", f"configured_hard_http_{status}"
+        if any(marker in text for marker in hard_markers):
+            return "hard", "configured_unavailable_response"
+        expected = {
+            int(value)
+            for value in (probe or {}).get("expected_statuses", [200, 301, 302])
+            if str(value).isdigit()
+        }
+        if challenged:
+            return "soft", "cloudflare_challenge"
+        if status in expected:
+            return "healthy", f"expected_http_{status}"
+        if status in {401, 403}:
+            return "soft", f"access_http_{status}"
+        if status == 429 or 500 <= status <= 599:
+            return "soft", f"upstream_http_{status}"
+        return "hard", f"unexpected_http_{status}"
+
+    if kind == "generic_transport":
+        expected = {
+            int(value)
+            for value in (probe or {}).get(
+                "expected_statuses", [200, 301, 302, 400, 401, 403, 404, 426]
+            )
+            if str(value).isdigit()
+        }
+        if status in expected:
+            return "healthy", f"transport_http_{status}"
+        if status == 429 or 500 <= status <= 599:
+            return "soft", f"upstream_http_{status}"
+        return "hard", f"unexpected_http_{status}"
+
     if kind == "local":
         if 200 <= status < 400:
             return "healthy", f"http_{status}"
@@ -524,6 +627,7 @@ def http_probe(
         body,
         exit_code,
         stderr,
+        probe,
     )
     return {
         "name": probe["name"],
@@ -538,7 +642,7 @@ def http_probe(
     }
 
 
-def route_probe(proxy_url: str, config: dict[str, Any]) -> dict[str, Any]:
+def route_probe(proxy_url: str | None, config: dict[str, Any]) -> dict[str, Any]:
     probes = list(config["active_probes"])
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(probes)) as executor:
         results = list(executor.map(lambda item: http_probe(proxy_url, item), probes))
@@ -570,20 +674,23 @@ def route_probe(proxy_url: str, config: dict[str, Any]) -> dict[str, Any]:
     soft = [
         f"{result['name']}:{result['reason']}" for result in results if result["verdict"] == "soft"
     ]
-    required_ok = all(
-        by_name.get(name, {}).get("verdict") == "healthy" for name in ("openai_api", "openai_auth")
+    required_names = [str(item) for item in config.get("required_probe_names", [])]
+    if not required_names:
+        required_names = ["openai_api", "openai_auth", "chatgpt_ws"]
+    required_ok = all(by_name.get(name, {}).get("verdict") == "healthy" for name in required_names)
+    ambiguous_names = {
+        str(item) for item in config.get("browser_ambiguous_probe_names", ["chatgpt_web"])
+    }
+    soft_results = [result for result in results if result["verdict"] == "soft"]
+    browser_challenge_only = bool(soft_results) and all(
+        str(result["name"]) in ambiguous_names and result.get("reason") == "cloudflare_challenge"
+        for result in soft_results
     )
-    web = by_name.get("chatgpt_web", {})
-    web_challenge_only = (
-        web.get("verdict") == "soft" and web.get("reason") == "cloudflare_challenge"
-    )
-    ws = by_name.get("chatgpt_ws")
-    ws_ok = ws is None or ws.get("verdict") == "healthy"
     if hard:
         classification = "hard_failure"
-    elif required_ok and ws_ok and web_challenge_only and len(soft) == 1:
+    elif required_ok and browser_challenge_only:
         classification = "browser_ambiguous"
-    elif required_ok and ws_ok and not soft:
+    elif required_ok and not soft:
         classification = "healthy"
     else:
         classification = "soft_unstable"
@@ -639,6 +746,7 @@ def node_template(protocol: str = "unknown") -> dict[str, Any]:
         "asn": None,
         "as_organization": None,
         "openai_status": "unknown",
+        "provider_status": "unknown",
         "last_observation": "unknown",
         "eligibility_state": "unknown",
         "candidate_eligible": False,
@@ -768,7 +876,7 @@ def migrate_v2_state(loaded: dict[str, Any]) -> dict[str, Any]:
             entry = node_template()
             if isinstance(value, dict):
                 entry.update(value)
-            entry["openai_status"] = "unknown"
+            set_provider_status(entry, "unknown")
             entry["last_observation"] = "unknown"
             entry["eligibility_state"] = "unknown"
             entry["candidate_eligible"] = False
@@ -819,6 +927,8 @@ def load_state(path: Path) -> dict[str, Any]:
     for entry in state["nodes"].values():
         if not isinstance(entry, dict):
             continue
+        if "provider_status" not in entry:
+            entry["provider_status"] = str(entry.get("openai_status") or "unknown")
         for key, value in node_template().items():
             entry.setdefault(key, value)
     state.setdefault("switch_history", [])
@@ -838,6 +948,16 @@ def success_rate(entry: dict[str, Any]) -> float:
     successes = int(entry.get("successes", 0))
     failures = int(entry.get("failures", 0))
     return (successes + 1) / (successes + failures + 2)
+
+
+def get_provider_status(entry: dict[str, Any]) -> str:
+    return str(entry.get("provider_status") or entry.get("openai_status") or "unknown")
+
+
+def set_provider_status(entry: dict[str, Any], status: str) -> None:
+    entry["provider_status"] = status
+    # Retain the v0.x state field so upgrades and third-party readers remain compatible.
+    entry["openai_status"] = status
 
 
 def recent_candidate_success_rate(
@@ -962,9 +1082,9 @@ def update_route_observation(
         entry["consecutive_failures"] = 0
         entry["last_success_at"] = timestamp
         if classification == "healthy":
-            entry["openai_status"] = "healthy"
-        elif entry.get("openai_status") != "healthy":
-            entry["openai_status"] = "browser_ambiguous"
+            set_provider_status(entry, "healthy")
+        elif get_provider_status(entry) != "healthy":
+            set_provider_status(entry, "browser_ambiguous")
         entry["eligibility_state"] = "ready"
         # 重试恢复仍是一次可用的完整路径样本；候选提交还需要至少一个
         # retry-free 深度样本，并在接管时通过更严格的在线门槛。
@@ -987,10 +1107,10 @@ def update_route_observation(
         entry["last_failure_at"] = timestamp
         entry["candidate_eligible"] = False
         if int(entry["consecutive_failures"]) >= 2:
-            entry["openai_status"] = "unavailable"
+            set_provider_status(entry, "unavailable")
             entry["eligibility_state"] = "unavailable"
         else:
-            entry["openai_status"] = "suspect"
+            set_provider_status(entry, "suspect")
             entry["eligibility_state"] = "suspect"
     else:
         entry["candidate_eligible"] = False
@@ -1157,7 +1277,7 @@ def node_rank(
     checked_at = now_ts() if timestamp is None else timestamp
     feedback_status = web_feedback_status(entry, checked_at)
     return (
-        0 if entry.get("openai_status") == "healthy" else 1,
+        0 if get_provider_status(entry) == "healthy" else 1,
         0
         if feedback_status == WEB_FEEDBACK_CONFIRMED
         else 2
@@ -1819,7 +1939,7 @@ def candidate_order(
         feedback = web_feedback_status(entry, checked_at)
         return (
             0 if entry.get("preflight_ok") else 1,
-            0 if entry.get("openai_status") == "healthy" else 1,
+            0 if get_provider_status(entry) == "healthy" else 1,
             0
             if feedback == WEB_FEEDBACK_CONFIRMED
             else 2
@@ -1930,6 +2050,8 @@ def failover(
     episode["phase"] = "switching"
     attempted: list[str] = []
     suffixes = tuple(config.get("ai_domain_suffixes", DEFAULT_AI_SUFFIXES))
+    exact_domains = tuple(config.get("ai_exact_domains", ()))
+    provider_name = str(config.get("provider_display_name") or "AI")
     max_attempts = int(config["max_candidate_attempts_per_failover"])
     prepared = prepare_failover_candidates(
         controller,
@@ -2031,7 +2153,11 @@ def failover(
             episode["phase"] = "probation"
             episode["new_node"] = candidate
             clear_all_unavailable(state)
-            closed = controller.close_stale_ai_connections(candidate, suffixes)
+            closed = (
+                controller.close_stale_ai_connections(candidate, suffixes, exact_domains)
+                if exact_domains
+                else controller.close_stale_ai_connections(candidate, suffixes)
+            )
             rebuild_pools(state, catalog, config, verified_at, candidate)
             log_event(
                 log_path,
@@ -2046,7 +2172,7 @@ def failover(
                 probation_until=monitor["probation_until"],
             )
             notify(
-                "OpenAI 代理已切换",
+                f"{provider_name} 代理已切换",
                 f"{old_node} → {candidate}；原因：{reason}",
             )
             return {
@@ -2119,7 +2245,10 @@ def failover(
             "backoff_until": monitor["backoff_until"],
         }
 
-    should_notify = mark_all_unavailable(state, config, now_ts())
+    episode_should_notify = mark_all_unavailable(state, config, now_ts())
+    should_notify = bool(
+        episode_should_notify and notify_all_unavailable_once(config, f"{provider_name} 代理监控")
+    )
     episode["phase"] = "all_unavailable"
     log_event(
         log_path,
@@ -2129,8 +2258,6 @@ def failover(
         episode_id=episode["id"],
         notified=should_notify,
     )
-    if should_notify:
-        notify("AI 代理监控", "当前机场全部不可用")
     return {
         "ok": False,
         "reason": "all_unavailable",
@@ -2453,7 +2580,8 @@ class MaintenanceWorker(threading.Thread):
         log_path: Path,
         config: dict[str, Any],
     ):
-        super().__init__(name="ai-pool-maintenance", daemon=True)
+        provider_id = str(config.get("provider_id") or "openai")
+        super().__init__(name=f"ai-pool-maintenance-{provider_id}", daemon=True)
         self.stop_event = stop_event
         self.state = state
         self.state_lock = state_lock
@@ -2507,6 +2635,14 @@ class MaintenanceWorker(threading.Thread):
     def deep_scan(self, nodes: Sequence[str], label: str) -> None:
         if not nodes:
             return
+        if not MAINTENANCE_SCAN_SEMAPHORE.acquire(blocking=False):
+            log_event(
+                self.log_path,
+                "maintenance_scan_deferred",
+                pool=label,
+                reason="another_provider_scan_active",
+            )
+            return
         try:
             with IsolatedScanner(self.config, nodes) as scanner:
                 for node in nodes:
@@ -2549,6 +2685,7 @@ class MaintenanceWorker(threading.Thread):
                 error=type(exc).__name__,
             )
         finally:
+            MAINTENANCE_SCAN_SEMAPHORE.release()
             with self.state_lock:
                 self.state["inventory"][f"{label}_scanned_at"] = now_ts()
                 atomic_write_json(self.state_path, self.state)
@@ -2645,6 +2782,8 @@ def command_status(config: dict[str, Any], state: dict[str, Any]) -> tuple[int, 
     pools = state["pools"]
     current_entry = state["nodes"].get(str(current), {})
     return (0 if controller_status == "ok" else 2), {
+        "provider_id": config.get("provider_id", "openai"),
+        "provider": config.get("provider_display_name", "OpenAI / ChatGPT / Codex"),
         "controller": controller_status,
         "group": config["group_name"],
         "current": current,
@@ -2652,7 +2791,7 @@ def command_status(config: dict[str, Any], state: dict[str, Any]) -> tuple[int, 
         "current_exit": {
             "country": current_entry.get("exit_country"),
             "asn": current_entry.get("asn"),
-            "status": current_entry.get("openai_status", "unknown"),
+            "status": get_provider_status(current_entry),
             "web_feedback": web_feedback_status(current_entry, now_ts()),
         },
         "monitor": state["monitor"],
@@ -2671,17 +2810,23 @@ def command_status(config: dict[str, Any], state: dict[str, Any]) -> tuple[int, 
 
 def command_check(config: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     direct = direct_network_probe(config)
+    identity = {
+        "provider_id": config.get("provider_id", "openai"),
+        "provider": config.get("provider_display_name", "OpenAI / ChatGPT / Codex"),
+    }
     try:
         controller = controller_from_config(config)
         current, _ = current_group(controller, config["group_name"])
         result = route_probe(config["mixed_proxy_url"], config)
     except (ControllerError, OSError) as exc:
         return 2, {
+            **identity,
             "direct": direct,
             "controller": "unavailable",
             "error": type(exc).__name__,
         }
     return (0 if direct["ok"] and result["usable"] else 2), {
+        **identity,
         "direct": direct,
         "current": current,
         "route": public_route_result(result),
@@ -2835,15 +2980,19 @@ def daemon_loop(
     state: dict[str, Any],
     state_path: Path,
     log_path: Path,
+    *,
+    stop_event: threading.Event | None = None,
+    manage_signals: bool = True,
 ) -> int:
-    stop_event = threading.Event()
+    active_stop_event = threading.Event() if stop_event is None else stop_event
 
     def stop_handler(signum: int, frame: Any) -> None:
         del signum, frame
-        stop_event.set()
+        active_stop_event.set()
 
-    signal.signal(signal.SIGTERM, stop_handler)
-    signal.signal(signal.SIGINT, stop_handler)
+    if manage_signals:
+        signal.signal(signal.SIGTERM, stop_handler)
+        signal.signal(signal.SIGINT, stop_handler)
     state_lock = threading.Lock()
     try:
         catalog = refresh_catalog(state, config, now_ts())
@@ -2859,7 +3008,7 @@ def daemon_loop(
         catalog = {}
 
     maintenance = MaintenanceWorker(
-        stop_event,
+        active_stop_event,
         state,
         state_lock,
         state_path,
@@ -2867,9 +3016,14 @@ def daemon_loop(
         config,
     )
     maintenance.start()
-    log_event(log_path, "daemon_started", interval=config["monitor_interval_seconds"])
+    log_event(
+        log_path,
+        "daemon_started",
+        provider_id=config.get("provider_id", "openai"),
+        interval=config["monitor_interval_seconds"],
+    )
 
-    while not stop_event.is_set():
+    while not active_stop_event.is_set():
         iteration_started = time.monotonic()
         try:
             controller = controller_from_config(config)
@@ -2905,15 +3059,82 @@ def daemon_loop(
                 elapsed_seconds=round(elapsed, 2),
             )
         remaining = max(0.2, float(config["monitor_interval_seconds"]) - elapsed)
-        stop_event.wait(remaining)
+        active_stop_event.wait(remaining)
 
     maintenance.join(timeout=8)
     log_event(log_path, "daemon_stopped")
     return 0
 
 
+def daemon_supervisor(config: dict[str, Any]) -> int:
+    """Run one isolated failover state machine per enabled Provider."""
+
+    provider_ids = enabled_provider_ids(config)
+    if not provider_ids:
+        print_output({"status": "no_enabled_providers"})
+        return 2
+    stop_event = threading.Event()
+
+    def stop_handler(signum: int, frame: Any) -> None:
+        del signum, frame
+        stop_event.set()
+
+    signal.signal(signal.SIGTERM, stop_handler)
+    signal.signal(signal.SIGINT, stop_handler)
+    threads: list[threading.Thread] = []
+    provider_failed = False
+    with ExitStack() as stack:
+        runtimes: list[tuple[dict[str, Any], dict[str, Any], Path, Path]] = []
+        for provider_id in provider_ids:
+            provider_config = resolve_provider_config(config, provider_id)
+            state_path, lock_path, log_path = ensure_runtime(provider_config)
+            lock = stack.enter_context(lock_path.open("a+", encoding="utf-8"))
+            try:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                print_output(
+                    {
+                        "status": "already_running",
+                        "provider_id": provider_id,
+                    }
+                )
+                stop_event.set()
+                return 2
+            runtimes.append(
+                (
+                    provider_config,
+                    load_state(state_path),
+                    state_path,
+                    log_path,
+                )
+            )
+
+        for index, (provider_config, state, state_path, log_path) in enumerate(runtimes):
+            provider_id = str(provider_config["provider_id"])
+            thread = threading.Thread(
+                target=daemon_loop,
+                name=f"ai-provider-{provider_id}",
+                args=(provider_config, state, state_path, log_path),
+                kwargs={"stop_event": stop_event, "manage_signals": False},
+                daemon=False,
+            )
+            thread.start()
+            threads.append(thread)
+            if index + 1 < len(runtimes) and stop_event.wait(1.5):
+                break
+
+        while not stop_event.wait(1):
+            if any(not thread.is_alive() for thread in threads):
+                provider_failed = True
+                stop_event.set()
+                break
+        for thread in threads:
+            thread.join(timeout=12)
+    return 2 if provider_failed else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="OpenAI 专用高可用监控")
+    parser = argparse.ArgumentParser(description="多 AI Provider 专用高可用监控")
     parser.add_argument(
         "command",
         choices=(
@@ -2928,6 +3149,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="status",
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
+    parser.add_argument("--provider")
     parser.add_argument("--node")
     parser.add_argument("--web-status", choices=tuple(sorted(WEB_FEEDBACK_STATUSES)))
     parser.add_argument("--reason", default="manual_browser_validation")
@@ -2942,7 +3164,28 @@ def print_output(value: dict[str, Any]) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    config = load_config(args.config)
+    base_config = load_config(args.config)
+    provider_id: str
+    if args.command == "daemon" and args.provider is None:
+        providers = enabled_provider_ids(base_config)
+        if not providers:
+            print_output({"status": "no_enabled_providers"})
+            return 2
+        if len(providers) > 1:
+            return daemon_supervisor(base_config)
+        provider_id = providers[0]
+    else:
+        provider_id = str(args.provider or base_config.get("default_provider_id") or "openai")
+    if args.command == "daemon" and not bool(
+        base_config.get("providers", {}).get(provider_id, {}).get("enabled")
+    ):
+        print_output({"status": "provider_disabled", "provider_id": provider_id})
+        return 2
+    try:
+        config = resolve_provider_config(base_config, provider_id)
+    except ProviderError as exc:
+        print_output({"status": "provider_invalid", "error": str(exc)})
+        return 2
     runtime = Path(config["runtime_path"])
     state_path = runtime / "state.json"
     state = load_state(state_path)

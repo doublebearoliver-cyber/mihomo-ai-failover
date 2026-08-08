@@ -7,6 +7,7 @@ from typing import Any
 
 from .config import ConfigError, default_config, load_config, write_config
 from .profiles import PROFILE_CONFIRMATION, apply_profile_integration
+from .providers import routing_profiles
 from .service import SERVICE_INSTALL_CONFIRMATION, install_service
 
 INSTALL_CONFIRMATION = "INSTALL_MIHOMO_AI_FAILOVER"
@@ -34,6 +35,7 @@ def install_local(
     else:
         config = default_config()
         write_config(target, config)
+        config = load_config(target)
         config_created = True
     profile = apply_profile_integration(
         config["clash_data_root"],
@@ -41,6 +43,8 @@ def install_local(
         confirmation=PROFILE_CONFIRMATION,
         group_name=config["group_name"],
         suffixes=list(config["ai_domain_suffixes"]),
+        exact_domains=list(config.get("ai_exact_domains", [])),
+        provider_profiles=routing_profiles(config),
     )
     can_start = bool(start and not profile["restart_required"])
     service = install_service(

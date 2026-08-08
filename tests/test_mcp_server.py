@@ -22,6 +22,11 @@ async def test_mcp_contract_and_annotations() -> None:
     tools = {tool.name: tool for tool in result.tools}
     assert {
         "diagnose_environment",
+        "list_provider_profiles",
+        "check_provider_paths",
+        "discover_provider_domains",
+        "preview_provider_overlay",
+        "apply_provider_overlay",
         "get_status",
         "run_health_check",
         "list_pools",
@@ -38,6 +43,8 @@ async def test_mcp_contract_and_annotations() -> None:
         "get_service_status",
     } == set(tools)
     assert tools["diagnose_environment"].annotations.read_only_hint is True
+    assert tools["discover_provider_domains"].annotations.read_only_hint is True
+    assert tools["apply_provider_overlay"].annotations.read_only_hint is False
     assert tools["run_health_check"].annotations.open_world_hint is True
     assert tools["install_failover"].annotations.read_only_hint is False
     assert tools["record_web_feedback"].annotations.read_only_hint is False

@@ -1,29 +1,39 @@
 ---
 name: openai-network-failover
-description: Diagnose ChatGPT or Codex connectivity on a Mac using Clash Verge and Mihomo, inspect the dedicated OpenAI failover monitor, or safely preview, install, start, stop, and roll back that monitor. Use when ChatGPT will not load, Codex spins or reports network errors, OpenAI streaming stalls, or the user asks about Mihomo AI failover.
+description: Diagnose and operate Provider-scoped AI failover on a Mac using Clash Verge and Mihomo. Use for ChatGPT, Codex, WorkBuddy (China), Kimi, MiniMax, or Mavis connectivity; local Provider-domain discovery; independent AI proxy groups; or safe preview, install, start, stop, and rollback workflows.
 license: MIT
-compatibility: Requires macOS, Clash Verge Rev with Mihomo, and trusted local access to the mihomo-ai-failover stdio MCP server.
+metadata:
+  compatibility: Requires macOS, Clash Verge Rev with Mihomo, and trusted local access to the mihomo-ai-failover stdio MCP server.
 ---
 
-# OpenAI network failover
+# Mihomo AI Provider failover
 
 Use the local `mihomo-ai-failover` MCP tools. The CLI and daemon are
 authoritative for live state and operations; this skill is the canonical
 machine-facing workflow and safety contract.
+
+The skill name remains `openai-network-failover` for version-0.x compatibility.
+OpenAI is enabled by default. Every other public Provider template is disabled
+until local evidence has been reviewed and the user authorizes a private
+overlay and persistent profile update.
 
 ## When to use this skill
 
 Use it for:
 
 - diagnosing ChatGPT page, login, API, streaming, or Codex network failures;
+- diagnosing WorkBuddy (China), Kimi, MiniMax, or Mavis network paths;
+- discovering sanitized Provider hostnames on the user's Mac and previewing a
+  narrow, private adaptation;
 - inspecting the active, warm, and cold failover pools;
 - checking whether the monitor switched correctly or entered backoff;
 - previewing, installing, starting, stopping, rolling back, or uninstalling
   the local monitor.
 
 Do not use it for general VPN tuning, fastest-node selection, global proxy
-changes, unrelated GitHub/npm/Docker failures, non-Mihomo clients, or a remote
-Mac that the agent cannot reach through a trusted local MCP client.
+changes, unrelated GitHub/npm/Docker failures, arbitrary website monitoring,
+non-Mihomo clients, or a remote Mac that the agent cannot reach through a
+trusted local MCP client.
 
 ## Authority and trust
 
@@ -47,8 +57,13 @@ operation.
 - Never modify Mihomo's generated runtime YAML.
 - Never enable TUN, disable the macOS system proxy, restart Codex, or change a
   global proxy group.
-- Keep GitHub, Git, npm, Docker, and ordinary websites out of the OpenAI
-  failover trigger.
+- Keep Provider state isolated. A WorkBuddy, Kimi, MiniMax, or Mavis failure
+  must not move the OpenAI group or increment OpenAI failure counters, and vice
+  versa.
+- Keep GitHub, Git, npm, Docker, shared infrastructure, and ordinary websites
+  out of every Provider failover trigger.
+- Never guess a login, API, WebSocket, CDN, storage, or authentication domain.
+  Public roots are bootstrap hints, not a complete domain claim.
 - Do not expose controller secrets, subscription URLs, proxy credentials,
   server addresses, exit IPs, or a full node inventory.
 - Leave `include_node_names` false unless the user explicitly needs node names.
@@ -59,6 +74,11 @@ operation.
 
 | Need | Tools |
 | --- | --- |
+| Inspect available Providers | `list_provider_profiles` |
+| Compare a Provider's direct and system-proxy paths | `check_provider_paths` |
+| Observe sanitized local Provider hostnames | `discover_provider_domains` |
+| Preview a private Provider adaptation | `preview_provider_overlay` |
+| Write one authorized private adaptation | `apply_provider_overlay` |
 | Diagnose the current problem | `diagnose_environment`, `get_status`, `run_health_check` |
 | Explain recent behavior | `get_recent_events`, `get_service_status` |
 | Inspect pool coverage | `list_pools` |
@@ -71,17 +91,23 @@ Read-only tools are the default. `run_health_check` performs network requests
 but never switches nodes. `simulate_failover` is isolated and never touches the
 live proxy.
 
+For Provider-specific tools, always pass the explicit `provider_id`. Read
+[`references/provider-adaptation.md`](references/provider-adaptation.md) before
+discovering or enabling a non-OpenAI Provider. Read
+[`references/public-profiles.md`](references/public-profiles.md) when selecting
+a built-in profile or interpreting its bootstrap probe.
+
 ## Diagnose a current failure
 
 1. Call `diagnose_environment`.
-2. Call `get_status`.
-3. Call `run_health_check`.
+2. Call `list_provider_profiles` and identify the exact Provider.
+3. Call `get_status` and `run_health_check` with that `provider_id`.
 4. If the failure appears intermittent, compare up to 20 sanitized records with
    `get_recent_events`.
 5. Explain which layer failed:
    - local network or DNS;
-   - Mihomo controller or dedicated AI group;
-   - OpenAI API, authentication, or ChatGPT web path;
+   - Mihomo controller or dedicated Provider group;
+   - that Provider's required probes and dedicated proxy group;
    - browser or app symptom without a verified network failure.
 
 Do not call an installation or service mutation during diagnosis.
@@ -90,7 +116,7 @@ Do not call an installation or service mutation during diagnosis.
 
 Hard-failure evidence includes a health-check-classified TCP/TLS failure,
 timeout, reset, or verified unavailable/region response. The daemon requires
-two consecutive verified hard-failure rounds on the OpenAI route and applies
+two consecutive verified hard-failure rounds on the selected Provider route and applies
 local-network and controller guards before evaluating a switch. The failing
 critical target may differ between rounds. The first hard-failure round may
 start isolated candidate preparation, but it never switches the live group by
@@ -105,8 +131,8 @@ Treat these as soft or auxiliary evidence:
 - a Cloudflare browser challenge;
 - failure of GitHub, Git, npm, Docker, or an ordinary website.
 
-An explicit user report that ChatGPT login succeeded or failed in the real
-browser may be recorded with `record_web_feedback`, but never infer that result
+An explicit user report that a Provider login succeeded or failed in the real
+browser/app may be recorded with `record_web_feedback`, but never infer that result
 from an automated Cloudflare challenge, a timeout in a browser-control tool, or
 Codex behavior. Browser feedback is time-limited, bound to the observed exit
 IP + ASN + country fingerprint, and never triggers a switch by itself. Stop the
@@ -124,11 +150,42 @@ Do not claim that a node should switch from one `run_health_check` snapshot.
 - Use `get_recent_events` to distinguish a hard failure, a soft anomaly, a
   successful switch, cooldown, and an all-unavailable backoff episode.
 - Treat a light delay result as preflight only. A switch candidate needs two
-  fresh full OpenAI-path samples, a just-in-time live-core preflight, live-route
+  fresh full Provider-path samples, a just-in-time live-core preflight, live-route
   verification before connection closure, and a post-switch probation period.
   The deep evidence needs two usable samples with at least one retry-free result.
   A retry-assisted live acceptance must pass a mandatory retry-free follow-up
   after three seconds before a newly selected route can commit.
+
+## Adapt a Provider to this Mac
+
+Use the detailed workflow in
+[`references/provider-adaptation.md`](references/provider-adaptation.md). The
+required order is:
+
+1. Diagnose and list profiles; do not mutate.
+2. Call `check_provider_paths` for the target Provider.
+   If direct is healthy and proxying is unnecessary or worse, do not force the
+   Provider into this system.
+3. Ask the user to actively exercise only that Provider during a bounded
+   `discover_provider_domains` window.
+4. Treat known roots as confirmation, process-correlated hosts as candidates,
+   and temporal-only browser hosts as unproven. Shared infrastructure is never
+   a failover trigger.
+5. Corroborate every new exact domain. Mark a domain critical only when a
+   failed TCP/TLS/HTTP transport path is an objective hard signal for that
+   Provider. A transport probe does not prove login, account, or model-output
+   success.
+6. Call `preview_provider_overlay`, explain exact domains, critical probes,
+   group, files, restart, and resource impact, then obtain authorization.
+7. Only then call `apply_provider_overlay` with local mutation opt-in and the
+   exact confirmation shown by the tool.
+8. Preview/apply persistent profile integration, restart Clash Verge if
+   required, run Provider-specific health/inventory checks, and only then start
+   or restart the monitor.
+
+The private overlay is local machine state. Never paste its observed domains
+into source templates, tests, commits, issues, or model prompts for other
+machines.
 
 ## Install or change the local monitor
 
@@ -146,6 +203,7 @@ Do not claim that a node should switch from one `run_health_check` snapshot.
 Use these tools only for the action the user approved:
 
 - `initialize_config`
+- `apply_provider_overlay`
 - `install_failover`
 - `start_monitor`
 - `stop_monitor`
@@ -170,6 +228,10 @@ Stop before changing state when:
   system proxy, restarting Codex, or altering unrelated traffic;
 - the agent is cloud-only or cannot reach the trusted local stdio MCP server;
 - the requested behavior falls outside this skill's supported environment.
+- a non-OpenAI Provider has only a public bootstrap root but no local evidence
+  for the user's real API/auth/streaming path;
+- enabling a Provider would require reusing another Provider's group or using
+  a shared CDN/identity platform as a hard-failure trigger.
 
 Do not turn a diagnosis request into an installation, rollback, or service
 change.
@@ -177,9 +239,9 @@ change.
 ## Report results
 
 Lead with the verified outcome. Separate observed evidence from inference.
-Mention whether the operation was read-only, whether a node switch occurred,
-which files or services changed, and whether a Clash Verge restart is still
-required. Give the smallest safe next action.
+Mention the Provider, whether the operation was read-only, whether a node
+switch occurred, which files or services changed, and whether a Clash Verge
+restart is still required. Give the smallest safe next action.
 
 Never include controller secrets, subscriptions, proxy credentials, server
 addresses, exit IPs, or a full node inventory in the response.

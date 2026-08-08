@@ -91,11 +91,39 @@ def diagnose_environment(config: dict[str, Any]) -> dict[str, Any]:
         version = client.version()
         controller["reachable"] = True
         controller["version"] = str(version.get("version") or "")[:80]
-        group = client.proxy(str(config["group_name"]))
+        try:
+            group = client.proxy(str(config["group_name"]))
+        except engine.ControllerError:
+            group = {}
         controller["ai_group_present"] = bool(isinstance(group, dict) and group.get("now"))
         controller["ai_group_member_count"] = (
             len(group.get("all", [])) if isinstance(group, dict) else 0
         )
+        provider_groups: list[dict[str, Any]] = []
+        providers = config.get("providers", {})
+        if isinstance(providers, dict):
+            for provider_id, profile in providers.items():
+                if not isinstance(profile, dict) or not bool(profile.get("enabled")):
+                    continue
+                try:
+                    provider_group = client.proxy(str(profile.get("group_name") or ""))
+                except engine.ControllerError:
+                    provider_group = {}
+                provider_groups.append(
+                    {
+                        "provider_id": str(provider_id),
+                        "display_name": str(profile.get("display_name") or provider_id),
+                        "present": bool(
+                            isinstance(provider_group, dict) and provider_group.get("now")
+                        ),
+                        "member_count": (
+                            len(provider_group.get("all", []))
+                            if isinstance(provider_group, dict)
+                            else 0
+                        ),
+                    }
+                )
+        controller["provider_groups"] = provider_groups
     except (engine.ControllerError, OSError) as exc:
         controller["error"] = type(exc).__name__
 
@@ -120,5 +148,6 @@ def diagnose_environment(config: dict[str, Any]) -> dict[str, Any]:
                 ("http://127.0.0.1:", "http://localhost:")
             ),
             "mcp_mutations_enabled": bool(config.get("mcp_allow_mutations", False)),
+            "provider_overlay_loaded": bool(config.get("provider_overlay_loaded", False)),
         },
     }

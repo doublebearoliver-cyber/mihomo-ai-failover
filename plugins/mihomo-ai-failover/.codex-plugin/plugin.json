@@ -1,7 +1,7 @@
 {
   "name": "mihomo-ai-failover",
-  "version": "0.1.0",
-  "description": "Diagnose and operate OpenAI-aware failover for Mihomo on macOS.",
+  "version": "0.2.0",
+  "description": "Diagnose and operate Provider-scoped AI failover for Mihomo on macOS.",
   "author": {
     "name": "Oliver",
     "url": "https://github.com/doublebearoliver-cyber"
@@ -21,8 +21,8 @@
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Mihomo AI Failover",
-    "shortDescription": "OpenAI-aware failover for Mihomo on macOS",
-    "longDescription": "Diagnose ChatGPT and Codex network failures, inspect a three-layer exit pool, and safely operate an OpenAI-only Mihomo failover monitor.",
+    "shortDescription": "Provider-scoped AI failover for Mihomo on macOS",
+    "longDescription": "Diagnose ChatGPT, Codex, WorkBuddy, Kimi, MiniMax, or Mavis network paths and safely operate isolated Provider failover groups.",
     "developerName": "Oliver",
     "category": "Developer Tools",
     "capabilities": [
@@ -34,7 +34,8 @@
     "privacyPolicyURL": "https://github.com/doublebearoliver-cyber/mihomo-ai-failover/blob/main/PRIVACY.md",
     "defaultPrompt": [
       "诊断 ChatGPT 或 Codex 当前网络状态，不要先修改配置。",
-      "检查 OpenAI 容灾监控、三层节点池和最近切换事件。",
+      "检查指定 AI Provider 的容灾监控、三层节点池和最近切换事件。",
+      "根据本机 Mihomo 连接证据预览 Provider 私有适配，不要猜域名。",
       "预览安装或回滚会修改哪些本地文件。"
     ],
     "brandColor": "#2563EB"
