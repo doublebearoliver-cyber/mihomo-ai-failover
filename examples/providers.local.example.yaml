@@ -1,0 +1,26 @@
+# Personal, machine-local overlay example. Do not copy these placeholder hosts
+# into a live setup. Generate a preview from locally observed evidence, then
+# write the real file with `provider-overlay-apply`.
+overlay_version: 1
+providers:
+  kimi:
+    enabled: true
+    exact_domains:
+      - api.example.invalid
+      - stream.example.invalid
+    active_probes:
+      - name: kimi_web
+        kind: generic_web
+        url: https://www.kimi.com/
+        expected_statuses: [200, 301, 302]
+        timeout_seconds: 6
+        connect_timeout_seconds: 4
+      - name: observed_transport_example
+        kind: generic_transport
+        url: https://stream.example.invalid/
+        expected_statuses: [200, 301, 302, 400, 401, 403, 404, 426]
+        timeout_seconds: 6
+        connect_timeout_seconds: 4
+    required_probe_names:
+      - kimi_web
+      - observed_transport_example

@@ -34,6 +34,11 @@ The package exposes:
 - `mihomo-ai-failover-mcp`: local stdio MCP server;
 - `openai-network-failover`: shared Codex and Claude Code skill.
 
+The skill name is retained for version-0.x compatibility; its current contract
+covers OpenAI, WorkBuddy (China), Kimi, MiniMax, and Mavis. Provider-specific
+adaptation details live in the skill's `references/` directory so the primary
+workflow stays concise.
+
 The plugin is under `plugins/mihomo-ai-failover/`. Codex and Claude use their
 own manifests but the same `.mcp.json`, launcher, and skill.
 
@@ -53,8 +58,13 @@ operate the user's Mac.
 | Tool | Class | Intended use |
 | --- | --- | --- |
 | `diagnose_environment` | Read-only, local | First call for every task |
-| `get_status` | Read-only, local | Current group, health, and pool summary |
-| `run_health_check` | Read-only, network | Real OpenAI path check; never switches |
+| `list_provider_profiles` | Read-only, local | Public templates and local enablement |
+| `check_provider_paths` | Read-only, network | Compare direct and system-proxy paths; never switches |
+| `discover_provider_domains` | Read-only, local | Observe sanitized hostnames during a bounded user workflow |
+| `preview_provider_overlay` | Read-only, local | Preview a private, narrow Provider adaptation |
+| `apply_provider_overlay` | Mutation, local | Write one authorized private overlay; does not edit Clash |
+| `get_status` | Read-only, local | Provider group, health, and pool summary |
+| `run_health_check` | Read-only, network | Real Provider path check; never switches |
 | `list_pools` | Read-only, local | Pool counts and independent-exit coverage |
 | `get_recent_events` | Read-only, local | Sanitized evidence for recent behavior |
 | `preview_install` | Read-only, local | Exact persistent changes before install |
@@ -76,13 +86,13 @@ on model instructions.
 
 | Signal | Agent interpretation |
 | --- | --- |
-| Two consecutive verified hard-failure rounds on the OpenAI route | The daemon may evaluate failover after the per-round hard-target retry plus local-network and controller guards; the failing critical target may differ between rounds |
+| Two consecutive verified hard-failure rounds on one Provider route | Only that Provider's daemon may evaluate failover after the per-round hard-target retry plus local-network and controller guards |
 | TCP/TLS failure, timeout, reset, or verified unavailable/region response | Hard-failure evidence when classified by the health checker |
 | One failed probe, small latency change, or a slow response | Soft anomaly; observe, do not switch |
-| Codex spins or temporarily has no output | Auxiliary symptom only |
+| An AI client spins or temporarily has no output | Auxiliary symptom only |
 | Cloudflare browser challenge | Browser state, not healthy-path proof and not independent node-failure proof |
-| User explicitly verifies ChatGPT login success/failure in a real browser | May be recorded as time-limited exit-fingerprint feedback; never infer it from an automated challenge page |
-| GitHub, Git, npm, Docker, or an ordinary website fails | Outside the OpenAI failover trigger |
+| User explicitly verifies Provider login success/failure in the real app/browser | May be recorded as time-limited exit-fingerprint feedback; never infer it from an automated challenge page |
+| GitHub, Git, npm, Docker, shared infrastructure, or an ordinary website fails | Outside every Provider failover trigger |
 
 `run_health_check` is a snapshot and never switches nodes. Use sanitized recent
 events to understand a sequence; do not manufacture a two-failure sequence from
@@ -100,6 +110,7 @@ Mutations require both:
 | Tool | Exact confirmation |
 | --- | --- |
 | `initialize_config` | `WRITE_LOCAL_CONFIG` |
+| `apply_provider_overlay` | `APPLY_PROVIDER_OVERLAY` |
 | `install_failover` | `INSTALL_MIHOMO_AI_FAILOVER` |
 | `start_monitor` | `START_LAUNCH_AGENT` |
 | `stop_monitor` | `STOP_LAUNCH_AGENT` |
@@ -122,6 +133,19 @@ The normal workflow is:
 6. enable local mutation policy;
 7. call one authorized mutation;
 8. diagnose again.
+
+For a disabled/non-OpenAI Provider, insert a read-only adaptation stage before
+preview/install: list profiles, compare direct/system-proxy paths, ask the user
+to exercise only that Provider, observe sanitized connections, and review the
+evidence. Known roots confirm existing coverage; process-correlated hosts may
+be proposed as exact domains; temporal-only browser hosts are never auto-added;
+shared infrastructure is never a critical trigger. The overlay write and the
+persistent Clash/service installation are separate mutations and require
+separate user authorization.
+
+Every Provider-specific read/status/health call must include its explicit
+`provider_id`. Never reuse OpenAI status, pools, feedback, or switch events as
+evidence for another Provider.
 
 For browser feedback, first establish the node and observed exit through
 read-only status/inventory evidence, obtain an explicit real-browser result
@@ -163,7 +187,7 @@ For an agent without plugin discovery:
 4. begin with `diagnose_environment`.
 
 Do not paste subscription URLs, controller secrets, proxy credentials, exit
-IPs, or full inventories into model prompts.
+IPs, full inventories, or a machine's private overlay into model prompts.
 
 ## Cloud-hosted agents
 
@@ -178,6 +202,7 @@ logging, revocation, and a separate threat model.
 An agent response must distinguish observed evidence from inference and state:
 
 - the verified outcome and failing layer;
+- the exact Provider ID;
 - whether the work was read-only or mutating;
 - whether a node switch occurred;
 - which files or services changed, if any;

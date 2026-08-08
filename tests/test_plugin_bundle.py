@@ -6,11 +6,13 @@ from pathlib import Path
 import yaml
 
 from mihomo_ai_failover import __version__
+from mihomo_ai_failover.discovery import PROVIDER_OVERLAY_CONFIRMATION
 from mihomo_ai_failover.installer import INSTALL_CONFIRMATION
 from mihomo_ai_failover.mcp_server import (
     CONFIG_WRITE_CONFIRMATION,
     SERVICE_START_CONFIRMATION,
     SERVICE_STOP_CONFIRMATION,
+    WEB_FEEDBACK_CONFIRMATION,
 )
 from mihomo_ai_failover.profiles import ROLLBACK_CONFIRMATION
 from mihomo_ai_failover.service import SERVICE_UNINSTALL_CONFIRMATION
@@ -21,6 +23,10 @@ SKILL = PLUGIN / "skills" / "openai-network-failover" / "SKILL.md"
 
 READ_ONLY_TOOLS = {
     "diagnose_environment",
+    "list_provider_profiles",
+    "check_provider_paths",
+    "discover_provider_domains",
+    "preview_provider_overlay",
     "get_status",
     "run_health_check",
     "list_pools",
@@ -31,9 +37,11 @@ READ_ONLY_TOOLS = {
 }
 MUTATION_TOOLS = {
     "initialize_config": CONFIG_WRITE_CONFIRMATION,
+    "apply_provider_overlay": PROVIDER_OVERLAY_CONFIRMATION,
     "install_failover": INSTALL_CONFIRMATION,
     "start_monitor": SERVICE_START_CONFIRMATION,
     "stop_monitor": SERVICE_STOP_CONFIRMATION,
+    "record_web_feedback": WEB_FEEDBACK_CONFIRMATION,
     "rollback_profile": ROLLBACK_CONFIRMATION,
     "uninstall_monitor": SERVICE_UNINSTALL_CONFIRMATION,
 }
@@ -71,7 +79,7 @@ def test_skill_frontmatter_and_marketplaces_reference_real_plugin() -> None:
     assert metadata["name"] == "openai-network-failover"
     assert "Diagnose" in metadata["description"]
     assert metadata["license"] == "MIT"
-    assert "macOS" in metadata["compatibility"]
+    assert "macOS" in metadata["metadata"]["compatibility"]
 
     codex_market = _json(ROOT / ".agents" / "plugins" / "marketplace.json")
     claude_market = _json(ROOT / ".claude-plugin" / "marketplace.json")
@@ -115,7 +123,7 @@ def test_agent_contract_is_discoverable_and_covers_every_mcp_tool() -> None:
 def test_agent_contract_preserves_failover_and_privacy_boundaries() -> None:
     skill = SKILL.read_text(encoding="utf-8")
     required_phrases = (
-        "two consecutive verified hard-failure rounds on the OpenAI route",
+        "two consecutive verified hard-failure rounds on the selected Provider route",
         "Never enable TUN",
         "Never modify Mihomo's generated runtime YAML",
         "Do not call an installation or service mutation during diagnosis",
@@ -123,3 +131,7 @@ def test_agent_contract_preserves_failover_and_privacy_boundaries() -> None:
     )
     for phrase in required_phrases:
         assert phrase in skill
+
+    references = SKILL.parent / "references"
+    assert (references / "provider-adaptation.md").is_file()
+    assert (references / "public-profiles.md").is_file()

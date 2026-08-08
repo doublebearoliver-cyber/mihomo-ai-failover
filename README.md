@@ -1,11 +1,13 @@
 # Mihomo AI Failover
 
-OpenAI-aware failover for Mihomo on macOS. It keeps a working selected node and
-switches a dedicated AI proxy group only after two consecutive, verified
-hard-failure rounds on the real OpenAI path.
+Provider-scoped AI failover for Mihomo on macOS. It keeps a working selected
+node and switches only the affected Provider's dedicated proxy group after two
+consecutive, verified hard-failure rounds on that Provider's real path.
 
-> Version `0.1.0` is an early public preview for macOS, Clash Verge Rev, and
-> Mihomo. It keeps the macOS system proxy and never enables TUN automatically.
+> Version `0.2.0` is an early public preview for macOS, Clash Verge Rev, and
+> Mihomo. OpenAI is enabled by default. WorkBuddy (China), Kimi, MiniMax, and
+> Mavis remain disabled until their real local traffic is observed and
+> reviewed. The project never enables TUN automatically.
 
 [中文说明](README.zh-CN.md) ·
 [AI agent contract](plugins/mihomo-ai-failover/skills/openai-network-failover/SKILL.md) ·
@@ -19,11 +21,24 @@ hard-failure rounds on the real OpenAI path.
 > supported environments, safety boundaries, tool order, stop conditions, and
 > result reporting. This README is not a substitute for that contract.
 
+## Public core and private adaptation
+
+There are two layers, not two long-lived forks:
+
+- the public layer contains the engine, conservative Provider templates,
+  CLI/MCP/Skill contracts, installer, rollback, and tests;
+- the personal layer is a mode-`0600` local `providers.local.yaml` overlay with
+  only that Mac's approved Provider enablement, exact domains, and probes.
+
+The public package contains no local nodes, exits, or observed hostnames. An
+agent must use local Mihomo evidence, preview the narrow overlay, and obtain
+authorization before writing it.
+
 ## Why
 
 Generic `url-test` groups optimize latency. They do not prove that ChatGPT
 login, the OpenAI API, streaming connections, or a particular exit region are
-usable. This project validates the real OpenAI path and:
+usable. This project validates each enabled Provider path and:
 
 - ignores small latency changes and isolated soft anomalies;
 - retries only the hard-failing probe once before a round can count as a
@@ -44,15 +59,37 @@ usable. This project validates the real OpenAI path and:
   seconds, otherwise it rolls back, followed by a 60-second probation period;
 - reruns a just-in-time live-core preflight immediately before each candidate
   selection, so stale preparation evidence cannot cause a blind switch;
-- closes stale OpenAI connections across every old chain only after the new
-  route verifies;
+- closes only the affected Provider's stale connections across old chains,
+  and only after the new route verifies;
 - notifies once per all-unavailable outage episode and backs off;
 - exposes the same behavior through a CLI, local stdio MCP, Codex plugin, and
   Claude Code plugin.
 
-A silent or spinning Codex UI is only an auxiliary symptom. It never triggers
-a switch by itself. GitHub, Git, npm, Docker, and ordinary websites are outside
-the OpenAI failure trigger.
+A silent or spinning AI client is only an auxiliary symptom. It never triggers
+a switch by itself. GitHub, Git, npm, Docker, shared infrastructure, and
+ordinary websites are outside every Provider failure trigger.
+
+Each Provider has a separate select group, health history, active/warm/cold
+pools, cooldowns, switch episode, state file, and log. Providers share only the
+read-only subscription node catalog. Background deep scans are serialized and
+daemon starts are staggered to bound local load.
+
+| Provider ID | Conservative public root | Default |
+| --- | --- | --- |
+| `openai` | reviewed OpenAI/ChatGPT roots | Enabled |
+| `workbuddy-cn` | `workbuddy.cn` | Disabled |
+| `kimi` | `kimi.com` | Disabled |
+| `minimax` | `minimaxi.com` | Disabled |
+| `mavis` | `mavislabs.ai` | Disabled |
+
+These are bootstrap identities, not exhaustive API/auth/streaming/CDN lists.
+Non-OpenAI profiles must be adapted from evidence on the target Mac before
+automatic failover is enabled.
+
+Each enabled Provider adds a bounded ten-second foreground check and its own
+health history. Enable only Providers the operator uses. Heavier isolated deep
+scans are serialized across Providers, so hundreds of subscription nodes are
+not all tested at high frequency.
 
 An exact ChatGPT Cloudflare challenge is classified as `browser_ambiguous`, not
 as a generic healthy response. It can remain candidate-eligible only when the
@@ -70,7 +107,7 @@ Install [`uv`](https://docs.astral.sh/uv/), then:
 
 ```bash
 uv tool install \
-  'mihomo-ai-failover[mcp] @ git+https://github.com/doublebearoliver-cyber/mihomo-ai-failover@v0.1.0'
+  'mihomo-ai-failover[mcp] @ git+https://github.com/doublebearoliver-cyber/mihomo-ai-failover@v0.2.0'
 ```
 
 Diagnose and preview before writing:
@@ -115,8 +152,9 @@ claude plugin install mihomo-ai-failover@mihomo-ai-failover
 ```
 
 Both plugins bundle the same `openai-network-failover` skill and local MCP
-server. MCP mutations are disabled by default and require both local opt-in and
-an exact server-enforced confirmation.
+server. The legacy skill name is retained for version-0.x compatibility. MCP
+mutations are disabled by default and require both local opt-in and an exact
+server-enforced confirmation.
 
 Agents without native plugin support can use the generic stdio MCP definition
 and load the same `SKILL.md` as instructions. The skill does not grant access to
@@ -139,6 +177,42 @@ mihomo-ai-failover service-start
 Use `rejected` and `browser_login_failed` for a verified failure. The command
 refuses to record feedback without an observed exit fingerprint.
 
+## Adapt another Provider
+
+Ask the user to exercise one Provider while the read-only observer runs:
+
+```bash
+mihomo-ai-failover diagnose
+mihomo-ai-failover providers-list
+mihomo-ai-failover provider-check --provider kimi
+mihomo-ai-failover provider-observe --provider kimi --duration-seconds 20
+```
+
+Known roots confirm coverage. Process-correlated hosts may be proposed as
+exact domains. Browser-only `temporal_only` hosts are never auto-added, and
+shared infrastructure is never a critical failover trigger. Preview before
+writing:
+
+```bash
+mihomo-ai-failover provider-overlay-preview \
+  --provider kimi \
+  --domain '<reviewed exact hostname>' \
+  --critical-domain '<reviewed critical hostname>' \
+  --enable
+```
+
+If direct access is already stable and proxying is unnecessary or worse, do
+not force that Provider into a failover group.
+
+After explicit authorization, write with
+`--confirm APPLY_PROVIDER_OVERLAY`, then separately preview/apply the
+persistent profile integration and restart Clash Verge when requested. See the
+[Provider adaptation contract](plugins/mihomo-ai-failover/skills/openai-network-failover/references/provider-adaptation.md).
+
+Disabling a Provider stops its state machine after the service restarts. To
+avoid deleting user-managed rules, previously installed persistent rules are
+removed only through an authorized rollback or explicit profile cleanup.
+
 ## Roll back
 
 ```bash
@@ -154,7 +228,7 @@ plist is moved to Trash rather than permanently deleted.
 
 ## Safety and privacy
 
-- Controls only the dedicated AI group.
+- Controls only dedicated Provider groups; one Provider cannot trigger another.
 - Uses the local Unix-domain Mihomo controller by default.
 - Reads the controller secret at runtime and never returns it.
 - Does not store subscription URLs, proxy server addresses, or proxy
@@ -163,7 +237,7 @@ plist is moved to Trash rather than permanently deleted.
 - Does not expose a TCP control listener.
 
 A hosted model cannot directly reach a user's localhost. An authenticated
-remote-to-local bridge is intentionally outside version 0.1. See
+remote-to-local bridge is intentionally outside version 0.x. See
 [PRIVACY.md](PRIVACY.md) for exact network destinations and local data.
 
 ## Development

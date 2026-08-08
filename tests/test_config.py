@@ -116,6 +116,6 @@ def test_old_config_is_upgraded_with_ws_probe(tmp_path: Path) -> None:
     )
     loaded = load_config(target, home=tmp_path)
     names = {item["name"] for item in loaded["active_probes"]}
-    assert loaded["config_version"] == 2
+    assert loaded["config_version"] == 3
     assert "openai_api" in names
     assert "chatgpt_ws" in names

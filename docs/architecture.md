@@ -12,16 +12,33 @@ the failover policy does not depend on a model being available.
 
 ```mermaid
 flowchart LR
-    UI["ChatGPT / Codex"] --> SP["macOS system proxy"]
-    SP --> AI["Dedicated AI select group"]
-    AI --> Node["Selected Mihomo node"]
+    Apps["ChatGPT / Codex / WorkBuddy / Kimi / MiniMax / Mavis"] --> SP["macOS system proxy"]
+    SP --> Rules["Approved Provider rules"]
+    Rules --> OA["OpenAI group"]
+    Rules --> KP["Other enabled Provider groups"]
+    OA --> NodeA["Selected node A"]
+    KP --> NodeB["Selected node B"]
     Watch["Local failover daemon"] --> Socket["Mihomo Unix socket"]
-    Socket --> AI
-    Watch --> Probe["OpenAI API + auth + web probes"]
-    Watch --> State["Local state and JSONL log"]
+    Socket --> OA
+    Socket --> KP
+    Watch --> Probe["Independent Provider probes"]
+    Watch --> State["Independent state and JSONL logs"]
     Agent["Codex / Claude"] --> MCP["stdio MCP"]
     MCP --> Watch
 ```
+
+## Provider isolation
+
+The public package defines conservative Provider templates. OpenAI is enabled
+by default; WorkBuddy (China), Kimi, MiniMax, and Mavis are disabled until a
+local overlay enables them. Each enabled Provider resolves to its own group,
+state file, pool history, cooldowns, outage episode, switch history, and log.
+The subscription node catalog is the only shared input.
+
+The LaunchAgent supervises one state-machine thread per enabled Provider.
+Starts are staggered. Background isolated deep scans use a process-wide
+semaphore, so only one Provider performs that heavier maintenance work at a
+time. Foreground failure confirmation remains Provider-local.
 
 ## Configuration sources
 
@@ -34,12 +51,27 @@ Groups and Rules enhancement files referenced by `profiles.yaml`. Existing
 enhancements are preserved. Writes are backed up, hash-checked, atomic, and
 ordered so `profiles.yaml` is written last.
 
+`config.yaml` contains public/base profiles. Optional machine-specific
+adaptation lives in mode-`0600` `providers.local.yaml`. It can enable a profile,
+add reviewed exact domains, and add validated probes without copying those
+observations into the publishable config. Loading merges the overlay in memory;
+rewriting the base config deliberately strips overlay-derived values.
+
+Local discovery samples Mihomo `/connections` and exposes only normalized
+hostnames, process basenames, evidence class, and counts. It never exposes URL
+paths, connection IDs, remote IPs, chains, credentials, or full inventories.
+Temporal-only browser observations are never auto-recommended, and shared
+infrastructure cannot become a generated critical probe.
+
 ## Health state machine
 
-1. Probe OpenAI API, OpenAI authentication, ChatGPT web, and ChatGPT
-   WebSocket transport concurrently.
-2. A valid API `401` JSON authentication response and valid auth OIDC issuer
-   prove the required path.
+1. Probe the selected Provider's configured required targets concurrently.
+   OpenAI uses API, authentication, ChatGPT web, and ChatGPT WebSocket
+   transport; other public templates begin with a conservative product-root
+   web probe and must be locally adapted before reliance.
+2. For OpenAI, a valid API `401` JSON authentication response and valid auth
+   OIDC issuer prove the required path. Generic probes use explicit accepted
+   statuses and optional reviewed hard statuses/body markers.
 3. Timeouts, TCP/TLS/DNS failures, resets, unsupported-region responses, or
    invalid required responses are hard failures.
 4. Rate limits, transient upstream 5xx responses, access responses, and
@@ -59,7 +91,7 @@ ordered so `profiles.yaml` is written last.
    preparation. A successful, soft-only, direct-network-down, or
    controller-down round resets confirmation and cannot trigger switching.
 
-Cloudflare challenges remain soft because command-line probes cannot prove the
+Cloudflare challenges and generic access responses remain soft because command-line probes cannot prove the
 interactive browser outcome. An explicitly user-verified login result can be
 stored separately as browser feedback. It is bound to the observed exit IP,
 ASN, and country, expires after a configured TTL, and affects candidate
@@ -76,6 +108,8 @@ deliberately not promised this latency bound.
 
 ## Candidate pools
 
+Every enabled Provider maintains the following pools independently:
+
 - Active: target 12-16 recently verified independent exits; a rotating batch of
   four gets light preflight every 10 seconds and two get a full-path scan every
   2 minutes.
@@ -86,7 +120,7 @@ deliberately not promised this latency bound.
 - Refill: when active or warm is below target, two cold candidates are scanned
   every 60 seconds instead of waiting for the normal cold cycle.
 
-All maintenance scans pause during hard-failure confirmation, switching, and
+That Provider's maintenance scans pause during its hard-failure confirmation, switching, and
 the 60-second probation period. This prevents inventory work from competing
 with the foreground health decision.
 
@@ -113,16 +147,16 @@ The daemon prepares bounded candidates by active, warm, then cold layer without
 moving the live AI group. Immediately before selection, it reruns a two-second
 Mihomo live-core preflight; stale candidates are quarantined without touching
 the group. After selecting one that passes, it waits three seconds and repeats
-the real OpenAI route probes through the live group. Two usable candidate
+the real Provider route probes through the live group. Two usable candidate
 samples are required and at least one must be retry-free. If the live acceptance
 round recovers a hard target on retry, the daemon waits three seconds and runs a
 mandatory second round. That second round must pass retry-free; otherwise the
 candidate is quarantined and the old selection is immediately restored without
 closing connections. A clean first round or clean mandatory follow-up commits
-the switch, starts a 60-second probation period, and closes only AI connections
-whose chains do not contain the new node. This removes stale connections from
-all older chains while preserving ordinary traffic and already-correct AI
-connections.
+the switch, starts a 60-second probation period, and closes only connections
+whose hostname matches that Provider's approved suffixes/exact domains and
+whose chains do not contain the new node. This preserves ordinary traffic,
+other Providers, and already-correct connections.
 
 The failure episode records attempted nodes and exit fingerprints, so it does
 not bounce between duplicate exits. Three independent candidates are prepared
@@ -134,6 +168,11 @@ the live-selection budget. Remaining untried exits cause a short
 candidate-retry backoff, not a false all-unavailable declaration. Only
 exhaustion of every eligible independent exit confirms the outage, sends one
 notification, and enters the longer backoff.
+
+Provider state deduplicates the all-unavailable notification for its entire
+outage episode. A small shared, credential-free local gate also suppresses the
+same `当前机场全部不可用` Toast when several Provider state machines confirm
+the airport-wide failure at nearly the same time.
 
 ## Persistence and recovery
 

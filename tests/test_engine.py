@@ -109,6 +109,21 @@ class ProbeClassificationTests(unittest.TestCase):
         )
         self.assertEqual((verdict, reason), ("healthy", "transport_http_404"))
 
+    def test_generic_web_can_classify_configured_region_response_as_hard(self):
+        verdict, reason = WATCHDOG.classify_probe(
+            "generic_web",
+            200,
+            {"content-type": "text/html"},
+            b"This service is not available for this account region",
+            0,
+            "",
+            {
+                "expected_statuses": [200],
+                "hard_body_markers": ["not available for this account region"],
+            },
+        )
+        self.assertEqual((verdict, reason), ("hard", "configured_unavailable_response"))
+
     def test_browser_challenge_is_separate_candidate_state(self):
         config = load_settings()
 
@@ -241,6 +256,92 @@ class ProbeClassificationTests(unittest.TestCase):
             "openai_auth", 0, {}, b"", 28, "Operation timed out"
         )
         self.assertEqual((verdict, reason), ("hard", "timeout"))
+
+
+class MultiProviderResourceTests(unittest.TestCase):
+    def test_all_unavailable_toast_is_deduplicated_across_providers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = default_config(home=Path(directory), clash_root=Path(directory) / "clash")
+            openai = WATCHDOG.resolve_provider_config(config, "openai")
+            kimi = WATCHDOG.resolve_provider_config(config, "kimi")
+            with mock.patch.object(WATCHDOG, "notify") as notify:
+                first = WATCHDOG.notify_all_unavailable_once(openai, "OpenAI", timestamp=1000)
+                second = WATCHDOG.notify_all_unavailable_once(kimi, "Kimi", timestamp=1001)
+
+        self.assertTrue(first)
+        self.assertFalse(second)
+        notify.assert_called_once_with("OpenAI", "当前机场全部不可用")
+
+    def test_schema_three_openai_state_keeps_health_on_provider_upgrade(self):
+        with tempfile.TemporaryDirectory() as directory:
+            state_path = Path(directory) / "state.json"
+            state_path.write_text(
+                '{"schema_version":3,"nodes":{"node":{"openai_status":"healthy"}}}',
+                encoding="utf-8",
+            )
+            loaded = WATCHDOG.load_state(state_path)
+
+        self.assertEqual(loaded["nodes"]["node"]["provider_status"], "healthy")
+        self.assertEqual(WATCHDOG.get_provider_status(loaded["nodes"]["node"]), "healthy")
+
+    def test_background_deep_scan_defers_while_another_provider_scan_is_active(self):
+        config = load_settings()
+        config["provider_id"] = "kimi"
+        state = WATCHDOG.default_state()
+        worker = WATCHDOG.MaintenanceWorker(
+            threading.Event(),
+            state,
+            threading.Lock(),
+            Path("/tmp/unused-provider-state.json"),
+            Path("/tmp/unused-provider-log.jsonl"),
+            config,
+        )
+
+        WATCHDOG.MAINTENANCE_SCAN_SEMAPHORE.acquire()
+        try:
+            with (
+                mock.patch.object(WATCHDOG, "IsolatedScanner") as scanner,
+                mock.patch.object(WATCHDOG, "log_event") as log_event,
+            ):
+                worker.deep_scan(["节点A"], "warm")
+        finally:
+            WATCHDOG.MAINTENANCE_SCAN_SEMAPHORE.release()
+
+        scanner.assert_not_called()
+        log_event.assert_called_once_with(
+            Path("/tmp/unused-provider-log.jsonl"),
+            "maintenance_scan_deferred",
+            pool="warm",
+            reason="another_provider_scan_active",
+        )
+
+    def test_single_enabled_non_default_provider_is_selected_for_daemon(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = default_config(home=root, clash_root=root / "clash")
+            config["providers"]["openai"]["enabled"] = False
+            config["providers"]["kimi"]["enabled"] = True
+            with (
+                mock.patch.object(WATCHDOG, "load_config", return_value=config),
+                mock.patch.object(WATCHDOG, "daemon_loop", return_value=0) as daemon,
+            ):
+                result = WATCHDOG.main(["daemon", "--config", str(root / "config.yaml")])
+
+        self.assertEqual(result, 0)
+        selected = daemon.call_args.args[0]
+        self.assertEqual(selected["provider_id"], "kimi")
+
+    def test_explicitly_disabled_provider_daemon_is_rejected(self):
+        config = load_settings()
+        config["providers"]["kimi"]["enabled"] = False
+        with (
+            mock.patch.object(WATCHDOG, "load_config", return_value=config),
+            mock.patch.object(WATCHDOG, "daemon_loop") as daemon,
+        ):
+            result = WATCHDOG.main(["daemon", "--provider", "kimi"])
+
+        self.assertEqual(result, 2)
+        daemon.assert_not_called()
 
 
 class DomainAndConnectionTests(unittest.TestCase):

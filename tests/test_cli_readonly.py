@@ -5,7 +5,7 @@ from unittest import mock
 
 import pytest
 
-from mihomo_ai_failover import engine
+from mihomo_ai_failover import cli, engine
 from mihomo_ai_failover.config import default_config, write_config
 
 
@@ -40,3 +40,30 @@ def test_read_only_core_commands_do_not_create_runtime(
 
     assert not runtime.exists()
     assert not logs.parent.exists()
+
+
+def test_provider_overlay_preview_is_read_only(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = default_config(home=tmp_path, clash_root=tmp_path / "clash")
+    config_path = tmp_path / "config.yaml"
+    write_config(config_path, config)
+    overlay = Path(config["provider_overlay_path"])
+
+    result = cli.main(
+        [
+            "provider-overlay-preview",
+            "--config",
+            str(config_path),
+            "--provider",
+            "kimi",
+            "--domain",
+            "api.kimi-service.example",
+            "--enable",
+        ]
+    )
+
+    assert result == 0
+    assert not overlay.exists()
+    assert '"provider_id": "kimi"' in capsys.readouterr().out

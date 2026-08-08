@@ -2,10 +2,30 @@
 
 All notable changes to this project will be documented here.
 
-## [Unreleased]
+## [0.2.0] - 2026-08-08
+
+### Added
+
+- Added independent Provider profiles for OpenAI, WorkBuddy (China), Kimi,
+  MiniMax, and Mavis. Only OpenAI remains enabled by default.
+- Added a private mode-`0600` `providers.local.yaml` overlay so one public code
+  base can support machine-specific exact domains and probes without a private
+  repository fork.
+- Added sanitized Mihomo connection observation, Provider path comparison,
+  overlay preview/apply, CLI commands, and five MCP tools for agent-guided
+  adaptation.
+- Added Provider-specific Skill references for evidence levels, safe
+  adaptation, public bootstrap roots, resource limits, and stop conditions.
 
 ### Changed
 
+- Isolated group selection, state, pools, cooldowns, switch episodes, browser
+  feedback, connection cleanup, and logs per enabled Provider while sharing the
+  read-only subscription catalog.
+- Serialized background deep scans across Providers and staggered daemon starts
+  to bound CPU and network load.
+- Upgraded local configuration to version 3 with backward migration from the
+  OpenAI-only schema.
 - Made the shared Agent Skill the canonical machine-facing usage contract.
 - Added explicit agent discovery, environment limits, tool selection, mutation
   consent, stop conditions, and privacy-safe reporting guidance.

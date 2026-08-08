@@ -15,12 +15,25 @@ from typing import Any
 from . import __version__, engine
 from .config import default_config, default_config_path, load_config, write_config
 from .diagnostics import diagnose_environment as diagnose_local_environment
+from .discovery import (
+    PROVIDER_OVERLAY_CONFIRMATION,
+)
+from .discovery import (
+    apply_provider_overlay as write_provider_overlay,
+)
+from .discovery import (
+    observe_provider_connections as observe_connections,
+)
+from .discovery import (
+    preview_provider_overlay as build_provider_overlay_preview,
+)
 from .installer import INSTALL_CONFIRMATION, install_local
 from .profiles import (
     ROLLBACK_CONFIRMATION,
     preview_profile_integration,
     rollback_profile_integration,
 )
+from .providers import resolve_provider_config, routing_profiles
 from .service import (
     SERVICE_UNINSTALL_CONFIRMATION,
     service_status,
@@ -71,8 +84,16 @@ def _require_mutation(
         raise MCPPolicyError(f"confirmation_required:{expected}")
 
 
-def _state(config: dict[str, Any]) -> dict[str, Any]:
-    return engine.load_state(Path(str(config["runtime_path"])) / "state.json")
+def _provider_config(config: dict[str, Any], provider_id: str | None) -> dict[str, Any]:
+    selected = str(
+        provider_id or config.get("provider_id") or config.get("default_provider_id") or "openai"
+    )
+    return resolve_provider_config(config, selected)
+
+
+def _state(config: dict[str, Any], provider_id: str | None = None) -> dict[str, Any]:
+    selected = _provider_config(config, provider_id)
+    return engine.load_state(Path(str(selected["runtime_path"])) / "state.json")
 
 
 def _redact_monitor(monitor: dict[str, Any]) -> dict[str, Any]:
@@ -89,10 +110,18 @@ def _redact_monitor(monitor: dict[str, Any]) -> dict[str, Any]:
     return {key: monitor.get(key) for key in sorted(allowed)}
 
 
-def _status(config: dict[str, Any], *, include_node_names: bool) -> dict[str, Any]:
-    code, result = engine.command_status(config, _state(config))
+def _status(
+    config: dict[str, Any],
+    *,
+    provider_id: str | None,
+    include_node_names: bool,
+) -> dict[str, Any]:
+    selected = _provider_config(config, provider_id)
+    code, result = engine.command_status(selected, _state(selected))
     output = {
         "ok": code == 0,
+        "provider_id": result["provider_id"],
+        "provider": result["provider"],
         "controller": result["controller"],
         "group": result["group"],
         "group_member_count": result["group_member_count"],
@@ -110,11 +139,15 @@ def _status(config: dict[str, Any], *, include_node_names: bool) -> dict[str, An
 def _pool_details(
     config: dict[str, Any],
     *,
+    provider_id: str | None,
     include_node_names: bool,
 ) -> dict[str, Any]:
-    state = _state(config)
+    selected = _provider_config(config, provider_id)
+    state = _state(selected)
     pools = state.get("pools", {})
     output: dict[str, Any] = {
+        "provider_id": selected["provider_id"],
+        "provider": selected["provider_display_name"],
         "counts": {
             "active": len(pools.get("active", [])),
             "warm": len(pools.get("warm", [])),
@@ -133,9 +166,11 @@ def _recent_events(
     config: dict[str, Any],
     limit: int,
     *,
+    provider_id: str | None,
     include_node_names: bool,
 ) -> list[dict[str, Any]]:
-    path = Path(str(config["log_path"]))
+    selected = _provider_config(config, provider_id)
+    path = Path(str(selected["log_path"]))
     if not path.is_file():
         return []
     safe_limit = max(1, min(int(limit), 100))
@@ -246,14 +281,14 @@ def create_server() -> Any:
     server = MCPServer(
         name="mihomo-ai-failover",
         title="Mihomo AI Failover",
-        description="Diagnose and operate OpenAI-aware failover on the local Mac.",
+        description="Diagnose and operate Provider-aware AI failover on the local Mac.",
         version=__version__,
         instructions=(
             "Call diagnose_environment before proposing changes. Keep read-only "
             "tools as the default. Never infer a node failure from a silent Codex "
             "UI alone. Mutating tools require local opt-in and exact confirmation. "
             "Do not expose controller secrets, subscriptions, proxy credentials, "
-            "or inventories. This server controls only the dedicated AI group."
+            "or inventories. Each Provider uses only its dedicated group."
         ),
     )
 
@@ -296,34 +331,175 @@ def create_server() -> Any:
         return diagnose_local_environment(config)
 
     @server.tool(
+        title="List AI Provider profiles",
+        description=(
+            "List public Provider templates and local enablement state without "
+            "returning observed hostnames, node names, exit IPs, or credentials."
+        ),
+        annotations=read_local,
+    )
+    def list_provider_profiles(config_path: str | None = None) -> dict[str, Any]:
+        _, config = _load(config_path)
+        return {
+            "default_provider_id": config["default_provider_id"],
+            "overlay_loaded": bool(config.get("provider_overlay_loaded")),
+            "providers": [
+                {
+                    "id": provider_id,
+                    "display_name": profile["display_name"],
+                    "enabled": bool(profile.get("enabled")),
+                    "group_name": profile["group_name"],
+                    "domain_suffix_count": len(profile.get("domain_suffixes", [])),
+                    "exact_domain_count": len(profile.get("exact_domains", [])),
+                }
+                for provider_id, profile in config["providers"].items()
+            ],
+        }
+
+    @server.tool(
+        title="Compare Provider network paths",
+        description=(
+            "Run the configured Provider probes once over a direct connection and "
+            "once through the current macOS system-proxy path. This is read-only, "
+            "does not require the Provider group to exist, and never switches nodes."
+        ),
+        annotations=read_network,
+    )
+    def check_provider_paths(
+        provider_id: str,
+        config_path: str | None = None,
+    ) -> dict[str, Any]:
+        _, config = _load(config_path)
+        selected = _provider_config(config, provider_id)
+        return {
+            "provider_id": provider_id,
+            "provider": selected["provider_display_name"],
+            "direct": engine.public_route_result(engine.route_probe(None, selected)),
+            "system_proxy": engine.public_route_result(
+                engine.route_probe(selected["mixed_proxy_url"], selected)
+            ),
+            "live_proxy_changed": False,
+        }
+
+    @server.tool(
+        title="Observe local Provider domains",
+        description=(
+            "Observe sanitized Mihomo connection hostnames for up to 60 seconds "
+            "while the user exercises one Provider. Never returns URLs, paths, "
+            "connection IDs, IPs, or chains. Temporal-only candidates are hidden by "
+            "default and, when explicitly requested, are never auto-recommended."
+        ),
+        annotations=read_local,
+    )
+    def discover_provider_domains(
+        provider_id: str,
+        config_path: str | None = None,
+        duration_seconds: int = 10,
+        include_temporal_candidates: bool = False,
+    ) -> dict[str, Any]:
+        _, config = _load(config_path)
+        controller = engine.controller_from_config(config)
+        return observe_connections(
+            controller,
+            config,
+            provider_id,
+            duration_seconds=duration_seconds,
+            include_temporal_candidates=include_temporal_candidates,
+        )
+
+    @server.tool(
+        title="Preview private Provider overlay",
+        description=(
+            "Preview exact-domain additions and optional Provider enablement in the "
+            "local private overlay. This does not write files or change Clash Verge."
+        ),
+        annotations=read_local,
+    )
+    def preview_provider_overlay(
+        provider_id: str,
+        exact_domains: list[str],
+        critical_domains: list[str] | None = None,
+        enabled: bool | None = None,
+        config_path: str | None = None,
+    ) -> dict[str, Any]:
+        _, config = _load(config_path)
+        return build_provider_overlay_preview(
+            config,
+            provider_id,
+            exact_domains=exact_domains,
+            critical_domains=critical_domains,
+            enabled=enabled,
+        )
+
+    @server.tool(
+        title="Write private Provider overlay",
+        description=(
+            "Write user-approved exact domains and optional Provider enablement to "
+            "the local private overlay. It does not modify Clash Verge by itself. "
+            "Requires mutation opt-in and "
+            f"confirmation={PROVIDER_OVERLAY_CONFIRMATION}."
+        ),
+        annotations=write_local,
+    )
+    def apply_provider_overlay(
+        provider_id: str,
+        exact_domains: list[str],
+        critical_domains: list[str] | None = None,
+        enabled: bool | None = None,
+        config_path: str | None = None,
+        confirmation: str = "",
+    ) -> dict[str, Any]:
+        _, config = _load(config_path)
+        _require_mutation(
+            config,
+            confirmation,
+            PROVIDER_OVERLAY_CONFIRMATION,
+        )
+        return write_provider_overlay(
+            config,
+            provider_id,
+            exact_domains=exact_domains,
+            critical_domains=critical_domains,
+            enabled=enabled,
+            confirmation=PROVIDER_OVERLAY_CONFIRMATION,
+        )
+
+    @server.tool(
         title="Get failover status",
         description=(
-            "Return controller, dedicated AI group, health state, and pool counts. "
+            "Return controller, dedicated Provider group, health state, and pool counts. "
             "Node names remain hidden unless include_node_names is true."
         ),
         annotations=read_local,
     )
     def get_status(
         config_path: str | None = None,
+        provider_id: str | None = None,
         include_node_names: bool = False,
     ) -> dict[str, Any]:
         _, config = _load(config_path)
-        return _status(config, include_node_names=include_node_names)
+        return _status(
+            config,
+            provider_id=provider_id,
+            include_node_names=include_node_names,
+        )
 
     @server.tool(
-        title="Run read-only OpenAI health check",
+        title="Run read-only Provider health check",
         description=(
-            "Probe direct connectivity and the real OpenAI API/auth/web path "
-            "through the selected AI group. This never switches nodes."
+            "Probe direct connectivity and the configured Provider path through "
+            "its selected AI group. Defaults to OpenAI and never switches nodes."
         ),
         annotations=read_network,
     )
     def run_health_check(
         config_path: str | None = None,
+        provider_id: str | None = None,
         include_node_name: bool = False,
     ) -> dict[str, Any]:
         _, config = _load(config_path)
-        code, result = engine.command_check(config)
+        selected = _provider_config(config, provider_id)
+        code, result = engine.command_check(selected)
         if not include_node_name:
             result.pop("current", None)
         return {"ok": code == 0, **result}
@@ -338,10 +514,15 @@ def create_server() -> Any:
     )
     def list_pools(
         config_path: str | None = None,
+        provider_id: str | None = None,
         include_node_names: bool = False,
     ) -> dict[str, Any]:
         _, config = _load(config_path)
-        return _pool_details(config, include_node_names=include_node_names)
+        return _pool_details(
+            config,
+            provider_id=provider_id,
+            include_node_names=include_node_names,
+        )
 
     @server.tool(
         title="Read recent sanitized failover events",
@@ -353,16 +534,21 @@ def create_server() -> Any:
     )
     def get_recent_events(
         config_path: str | None = None,
+        provider_id: str | None = None,
         limit: int = 20,
         include_node_names: bool = False,
     ) -> dict[str, Any]:
         _, config = _load(config_path)
+        selected = _provider_config(config, provider_id)
         return {
+            "provider_id": selected["provider_id"],
+            "provider": selected["provider_display_name"],
             "events": _recent_events(
                 config,
                 limit,
+                provider_id=provider_id,
                 include_node_names=include_node_names,
-            )
+            ),
         }
 
     @server.tool(
@@ -380,6 +566,8 @@ def create_server() -> Any:
                 config["clash_data_root"],
                 group_name=config["group_name"],
                 suffixes=list(config["ai_domain_suffixes"]),
+                exact_domains=list(config.get("ai_exact_domains", [])),
+                provider_profiles=routing_profiles(config),
             )
         except Exception as exc:
             profile = {"ok": False, "error": str(exc) or type(exc).__name__}
@@ -419,9 +607,9 @@ def create_server() -> Any:
         return {"created": True, "config": str(target)}
 
     @server.tool(
-        title="Record real-browser OpenAI web feedback",
+        title="Record real-browser Provider web feedback",
         description=(
-            "Record time-limited ChatGPT browser login evidence for the node's "
+            "Record time-limited browser evidence for the Provider and node's "
             "current observed exit fingerprint. status must be confirmed or "
             "rejected. This never switches a proxy and requires the monitor to "
             "be stopped, mutation opt-in, and "
@@ -434,12 +622,14 @@ def create_server() -> Any:
         status: str,
         reason: str,
         config_path: str | None = None,
+        provider_id: str | None = None,
         ttl_seconds: int | None = None,
         confirmation: str = "",
     ) -> dict[str, Any]:
         _, config = _load(config_path)
         _require_mutation(config, confirmation, WEB_FEEDBACK_CONFIRMATION)
-        state_path, lock_path, log_path = engine.ensure_runtime(config)
+        selected = _provider_config(config, provider_id)
+        state_path, lock_path, log_path = engine.ensure_runtime(selected)
         with lock_path.open("a+", encoding="utf-8") as lock:
             try:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -447,7 +637,7 @@ def create_server() -> Any:
                 raise MCPPolicyError("monitor_must_be_stopped") from exc
             state = engine.load_state(state_path)
             _, result = engine.command_web_feedback(
-                config,
+                selected,
                 state,
                 state_path,
                 log_path,
@@ -457,7 +647,12 @@ def create_server() -> Any:
                 ttl_seconds,
             )
         result.pop("node", None)
-        return {"ok": True, **result}
+        return {
+            "ok": True,
+            "provider_id": selected["provider_id"],
+            "provider": selected["provider_display_name"],
+            **result,
+        }
 
     @server.tool(
         title="Install local failover",

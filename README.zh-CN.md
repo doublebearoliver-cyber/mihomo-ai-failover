@@ -1,10 +1,12 @@
 # Mihomo AI Failover
 
-面向 macOS、Clash Verge Rev 和 Mihomo 的 OpenAI 专用自动容灾工具。
-它保留仍然可用的当前节点，不做“延迟最低优先”；只有真实 OpenAI
-路径连续出现两轮可验证硬故障，才切换专用 AI 代理组。
+面向 macOS、Clash Verge Rev 和 Mihomo 的多 AI Provider 自动容灾工具。
+它保留仍然可用的当前节点，不做“延迟最低优先”；只有某个 Provider
+的真实路径连续出现两轮可验证硬故障，才切换该 Provider 自己的代理组。
 
-> 当前版本：`0.1.0` 公开预览。默认继续使用 macOS 系统代理，不启用 TUN。
+> 当前版本：`0.2.0` 公开预览。默认只启用 OpenAI；WorkBuddy（国内版）、
+> Kimi、MiniMax 和 Mavis 必须先在本机发现并审核真实连接，再单独启用。
+> 默认继续使用 macOS 系统代理，不启用 TUN。
 
 [English](README.md) ·
 [AI 使用契约](plugins/mihomo-ai-failover/skills/openai-network-failover/SKILL.md) ·
@@ -16,12 +18,26 @@
 > 这是面向模型的权威使用契约，定义了适用环境、安全边界、工具顺序、停止条件
 > 和结果输出要求；不能只根据本 README 自行操作。
 
+## 两层版本，不维护两个分叉
+
+- **公开版**：通用引擎、五个保守 Provider 模板、CLI、MCP、Skill、安装、
+  回滚和测试；不包含任何用户的节点、出口或本机观察域名。
+- **个人版**：同一套代码加本机私有 `providers.local.yaml` 覆写；记录这台
+  Mac 已审核的 Provider 开关、精确域名和关键探针。文件权限为 `0600`，
+  位于应用数据目录，Git 默认忽略。
+
+这种结构避免私人分叉长期落后于公开版。其他 Agent 不能把公开模板当成完整
+域名清单，必须根据目标电脑的 Mihomo 实时连接做只读发现、预览并取得授权后
+写入本机覆写。
+
 ## 它解决什么
 
 - ChatGPT 页面打不开、登录链路异常或流式输出中断；
 - Codex 桌面端出现可验证网络错误；
 - 普通网站仍正常，但当前出口不再能访问 OpenAI；
-- 大量订阅节点中缺少按真实出口去重、稳定优先的自动切换。
+- 大量订阅节点中缺少按真实出口去重、稳定优先的自动切换；
+- WorkBuddy（国内版）、Kimi、MiniMax 或 Mavis 在某台 Mac 上需要独立
+  代理路径和容灾，但不能让它们的故障干扰 OpenAI。
 
 Codex 暂时没有输出、一次延迟升高、一次偶发失败和 Cloudflare
 浏览器挑战都不会单独触发切换。只有在 API、认证和 WebSocket 传输正常时，
@@ -33,9 +49,26 @@ Codex 暂时没有输出、一次延迟升高、一次偶发失败和 Cloudflare
 默认排除 24 小时。反馈不会单独触发切换；出口指纹变化或有效期届满后会重新
 评估，避免按节点名称永久拉黑。
 
+## Provider 隔离
+
+| Provider ID | 公开根域提示 | 默认状态 | 容灾状态 |
+| --- | --- | --- | --- |
+| `openai` | `openai.com`、`chatgpt.com` 及已审核静态/内容域 | 启用 | 独立组、状态、日志、冷却 |
+| `workbuddy-cn` | `workbuddy.cn` | 禁用 | 启用后独立 |
+| `kimi` | `kimi.com` | 禁用 | 启用后独立 |
+| `minimax` | `minimaxi.com` | 禁用 | 启用后独立 |
+| `mavis` | `mavislabs.ai` | 禁用 | 启用后独立 |
+
+这些根域只用于识别产品和启动只读探测，不代表完整 API、认证、流式、文件或
+CDN 清单。非 OpenAI Provider 默认禁用；启用前必须按 Agent 契约取得本机
+证据和用户授权。各 Provider 只共享订阅中的真实节点目录；选中节点、健康记录、三层池、
+故障计数、冷却、切换记录和日志全部隔离。
+
 ## 核心行为
 
-- 每 10 秒检查 OpenAI API、认证、ChatGPT 网页和 WebSocket 传输路径；
+- 每个已启用 Provider 默认每 10 秒检查自己的关键路径；OpenAI 使用 API、
+  认证、ChatGPT 网页和 WebSocket 传输语义探针；其他 Provider 从保守根域
+  探针开始，并按本机证据补充精确域名和关键传输探针；
 - 连续两轮硬故障后才切换；两轮可以来自不同关键目标，但都必须通过本地网络
   和控制器守卫，且至少间隔 8 秒；
 - 每轮只对硬故障目标延迟 1 秒复核一次；复核恢复就不计故障，健康目标不重复
@@ -46,14 +79,16 @@ Codex 暂时没有输出、一次延迟升高、一次偶发失败和 Cloudflare
   真正试切 2 个；进入提交阶段后直接复用已有候选，不为凑满 3 个阻塞，2 秒
   即时预检失败且从未被选中的候选也不占试切额度；
 - 先排除本地断网和 Mihomo 控制器不可用，避免盲切；
-- 活跃、温备、冷备三层池按真实出口 IP 去重，并分散 ASN 和地区；
+- 每个 Provider 的活跃、温备、冷备三层池按真实出口 IP 去重，并分散 ASN
+  和地区；跨 Provider 的后台深度扫描串行执行，守护线程错峰启动；
 - 候选排序先看健康、成功率、不同出口、不同 ASN、冷却和稳定性，
   最后才看延迟；
 - 每次选候选前先通过实时 Mihomo 内核做一次 2 秒即时预检；通过后才选入 AI
   组，等待 3 秒并做完整在线复验；若复验靠硬故障目标重试才恢复，间隔 3 秒
   强制追加一次完整复验，追加复验必须首轮干净通过，否则立即回滚旧节点，且
   不关闭任何连接；
-- 复验成功后，关闭所有不经过新节点的旧 OpenAI 连接，不影响普通网站，
+- 复验成功后，只关闭匹配该 Provider 已审核域名、且不经过新节点的旧连接，
+  不影响普通网站或其他 Provider，
   并进入 60 秒观察期；
 - 原节点至少冷却 5 分钟，恢复需连续成功；
 - 只有活跃、温备和冷备中的独立出口均被本轮验证耗尽后，才判定全部不可用；
@@ -61,7 +96,7 @@ Codex 暂时没有输出、一次延迟升高、一次偶发失败和 Cloudflare
 - 成功切换会显示 macOS 通知，例如
   `日本 01 → 美国 03；原因：连续两次硬故障（timeout）`。
 
-默认 AI 域名后缀只有：
+默认 OpenAI 域名后缀只有：
 
 ```text
 openai.com
@@ -71,7 +106,16 @@ oaiusercontent.com
 oaistatsig.com
 ```
 
-GitHub、Git、npm、Docker 和普通网站不会成为 OpenAI 切换触发条件。
+GitHub、Git、npm、Docker、Cloudflare/Google 等共享基础设施和普通网站不会
+成为任何 Provider 的切换触发条件。
+
+## 运行开销
+
+只启用 OpenAI 时，开销与 0.1 版基本相同。每多启用一个 Provider，会增加一套
+默认 10 秒一次的轻量前台探测和一份独立节点健康历史；因此不要启用实际上不
+使用的 Provider。较重的隔离深度扫描在 Provider 之间串行，线程启动也会错峰，
+不会让几百个节点同时高频测速。工具不启用 TUN、不修改全局组，也不常驻上传
+数据。
 
 ## 前提
 
@@ -89,7 +133,7 @@ GitHub、Git、npm、Docker 和普通网站不会成为 OpenAI 切换触发条�
 
 ```bash
 uv tool install \
-  'mihomo-ai-failover[mcp] @ git+https://github.com/doublebearoliver-cyber/mihomo-ai-failover@v0.1.0'
+  'mihomo-ai-failover[mcp] @ git+https://github.com/doublebearoliver-cyber/mihomo-ai-failover@v0.2.0'
 ```
 
 先只读诊断和预览：
@@ -131,7 +175,7 @@ codex plugin add mihomo-ai-failover@mihomo-ai-failover
 
 插件提供 `openai-network-failover` Skill 和本地 stdio MCP。启动器优先
 复用已安装的 `mihomo-ai-failover-mcp`；找不到时才通过 `uv` 从固定
-`v0.1.0` 标签获取。它不会开启 TCP 监听。
+`v0.2.0` 标签获取。它不会开启 TCP 监听。
 
 ## Claude Code 插件
 
@@ -140,7 +184,7 @@ claude plugin marketplace add doublebearoliver-cyber/mihomo-ai-failover
 claude plugin install mihomo-ai-failover@mihomo-ai-failover
 ```
 
-Codex 和 Claude 共用同一套安全工作流与 15 个 MCP 工具。写工具默认禁用；
+Codex 和 Claude 共用同一套安全工作流与 20 个 MCP 工具。写工具默认禁用；
 即使启用，也必须提供服务器在代码中校验的精确确认词。详见
 [Agent 接入说明](docs/agent-integration.md)。
 
@@ -161,8 +205,58 @@ Codex 和 Claude 共用同一套安全工作流与 15 个 MCP 工具。写工具
 | `run-once` | 可能切换 | 执行一轮正式监控逻辑 |
 | `daemon` | 可能切换 | 长期运行监控 |
 | `service-start` / `service-stop` | 是 | 启停用户级 LaunchAgent |
+| `providers-list` | 否 | 查看公开模板和本机启用状态 |
+| `provider-check --provider ID` | 否 | 对比直连和当前系统代理路径；不切换 |
+| `provider-observe --provider ID` | 否 | 观察脱敏后的本机连接域名 |
+| `provider-overlay-preview --provider ID` | 否 | 预览个人版私有覆写 |
+| `provider-overlay-apply --provider ID` | 是 | 写入经授权的私有覆写；不直接改 Clash |
 
-所有命令支持 `--config /绝对路径/config.yaml`。
+Provider 相关命令以及 `status`、`check`、`inventory`、`run-once` 支持
+`--provider ID`；所有命令支持 `--config /绝对路径/config.yaml`。
+
+### 让 Agent 适配一个新 Provider
+
+下面以 Kimi 为例。发现阶段保持只读，并要求用户在观察窗口内实际打开、登录、
+发起对话或生成：
+
+```bash
+mihomo-ai-failover diagnose
+mihomo-ai-failover providers-list
+mihomo-ai-failover provider-check --provider kimi
+mihomo-ai-failover provider-observe --provider kimi --duration-seconds 20
+```
+
+只有进程关联或其他可复核证据充分的域名，才应作为精确域名进入预览；仅仅在
+浏览器观察窗口中同时出现的域名属于 `temporal_only`，不会自动推荐。共享
+CDN、登录平台或统计域名不能作为关键故障触发器。
+如果直连本来稳定可用而代理路径更差或没有必要，不要强行启用该 Provider
+容灾；保留原有直连/规则行为。
+
+```bash
+mihomo-ai-failover provider-overlay-preview \
+  --provider kimi \
+  --domain api.example.invalid \
+  --critical-domain stream.example.invalid \
+  --enable
+```
+
+上面 `.invalid` 只是格式示例，不能原样使用。Agent 必须替换为这台 Mac 上
+已审核的真实域名。用户确认预览后才允许写入：
+
+```bash
+mihomo-ai-failover provider-overlay-apply \
+  --provider kimi \
+  --domain '<已审核精确域名>' \
+  --critical-domain '<已审核关键域名>' \
+  --enable \
+  --confirm APPLY_PROVIDER_OVERLAY
+```
+
+覆写本身不会改 Clash。已有安装应先停止监控，再运行 `profile-preview` 和
+`profile-install --confirm APPLY_PROFILE_INTEGRATION`，按结果重启 Clash Verge，
+然后执行 `check --provider kimi`、`inventory --provider kimi` 和
+`service-start`。完整 Agent 工作流见
+[Skill 的 Provider 适配参考](plugins/mihomo-ai-failover/skills/openai-network-failover/references/provider-adaptation.md)。
 
 真实浏览器反馈是显式写操作。先停止监控，确认浏览器结果，再记录并重启：
 
@@ -187,22 +281,30 @@ mihomo-ai-failover service-start
 1. 找出 `profiles.yaml` 当前订阅；
 2. 复用当前 Groups 和 Rules enhancement 文件；
 3. 没有 enhancement 时才新建；
-4. 添加一个 `select` 类型的专用 AI 组；
-5. 将五条 AI 域名规则放入 Rules enhancement；
+4. 为每个已启用 Provider 添加一个独立 `select` 组；
+5. 只把该 Provider 的公开根域和本机已审核精确域名放入 Rules enhancement；
 6. 每次写入前创建带清单和 SHA-256 的备份；
 7. 原子写入 enhancement，最后才写 `profiles.yaml`。
 
 因此更新订阅、重启 Clash Verge 和重启 Mac 后仍可保留。路径穿越、
 symlink 逃逸、冲突规则和写入期间文件变化都会让安装安全停止。
+`--disable` 会在监控服务重启后停止该 Provider 状态机，但为了不擅自删除用户
+规则，已安装的持久化组/规则不会自动移除；需要经授权回滚或定向清理。
 
 ## 本地文件
 
 默认路径：
 
 - 配置：`~/Library/Application Support/Mihomo AI Failover/config.yaml`
+- 私有 Provider 覆写：
+  `~/Library/Application Support/Mihomo AI Failover/providers.local.yaml`
 - 状态：`~/Library/Application Support/Mihomo AI Failover/state.json`
+- 非 OpenAI Provider 状态：
+  `~/Library/Application Support/Mihomo AI Failover/providers/<id>/state.json`
 - 备份：`~/Library/Application Support/Mihomo AI Failover/backups/`
 - 日志：`~/Library/Logs/Mihomo AI Failover/monitor.jsonl`
+- 非 OpenAI Provider 日志：
+  `~/Library/Logs/Mihomo AI Failover/providers/<id>/monitor.jsonl`
 - LaunchAgent：
   `~/Library/LaunchAgents/io.github.doublebearoliver.mihomo-ai-failover.plist`
 
@@ -231,9 +333,10 @@ uv tool uninstall mihomo-ai-failover
 ## 安全边界和限制
 
 - 只控制专用 AI 组，不控制全局代理组；
+- 每个 Provider 只控制自己的组；不会用一个 Provider 的故障触发另一个；
 - 只在同一台 Mac 上运行，不提供远程控制端口；
 - ChatGPT 网页中的云端模型不能直接访问本机 `localhost`；
-- 0.1 版不提供远程到本地桥接，不以公网控制器代替该能力；
+- 0.x 版不提供远程到本地桥接，不以公网控制器代替该能力；
 - TUN 只应在同节点 A/B 证明 Codex 绕过系统代理后另行评估，本项目不会
   自动启用；
 - 首次插件自举会访问 GitHub 和 Python 包索引；运行时网络目的地及本地数据

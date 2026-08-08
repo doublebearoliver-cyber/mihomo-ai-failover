@@ -201,24 +201,42 @@ def _ensure_rules(
     rules: dict[str, Any],
     group_name: str,
     suffixes: list[str],
-) -> list[str]:
-    additions: list[str] = []
+    exact_domains: list[str] | None = None,
+) -> tuple[list[str], list[str]]:
+    suffix_additions: list[str] = []
+    domain_additions: list[str] = []
     existing_rules = list(rules.get("prepend", [])) + list(rules.get("append", []))
     parsed = [_parse_rule(rule) for rule in existing_rules]
-    for suffix in suffixes:
-        normalized = suffix.lower().rstrip(".")
+
+    def ensure(
+        rule_type: str,
+        value: str,
+        additions: list[str],
+        *,
+        before_suffixes: bool = False,
+    ) -> None:
+        normalized = value.lower().rstrip(".")
         matches = [
             value
             for value in parsed
-            if value is not None and value[0] == "DOMAIN-SUFFIX" and value[1] == normalized
+            if value is not None and value[0] == rule_type and value[1] == normalized
         ]
         if any(value[2] != group_name for value in matches):
             raise ProfileIntegrationError(f"conflicting_domain_rule:{normalized}")
         if not matches:
-            rule = f"DOMAIN-SUFFIX,{normalized},{group_name}"
-            rules["prepend"].append(rule)
+            rule = f"{rule_type},{normalized},{group_name}"
+            if before_suffixes:
+                rules["prepend"].insert(0, rule)
+            else:
+                rules["prepend"].append(rule)
             additions.append(normalized)
-    return additions
+            parsed.append((rule_type, normalized, group_name))
+
+    for domain in exact_domains or []:
+        ensure("DOMAIN", domain, domain_additions, before_suffixes=True)
+    for suffix in suffixes:
+        ensure("DOMAIN-SUFFIX", suffix, suffix_additions)
+    return suffix_additions, domain_additions
 
 
 def prepare_profile_integration(
@@ -226,7 +244,11 @@ def prepare_profile_integration(
     *,
     group_name: str = DEFAULT_GROUP_NAME,
     suffixes: list[str] | None = None,
+    exact_domains: list[str] | None = None,
+    provider_profiles: list[dict[str, Any]] | None = None,
 ) -> _PreparedPlan:
+    if provider_profiles == []:
+        raise ProfileIntegrationError("no_enabled_providers")
     root = Path(clash_root).expanduser().resolve()
     profiles_path = _safe_child(root, "profiles.yaml", "profiles_file")
     profiles_dir = _safe_child(root, "profiles", "profiles_directory")
@@ -256,20 +278,52 @@ def prepare_profile_integration(
     )
     groups = _enhancement_mapping(group_path)
     rules = _enhancement_mapping(rules_path)
-    group_added = _ensure_group(groups, group_name)
-    suffix_additions = _ensure_rules(
-        rules,
-        group_name,
-        list(DEFAULT_AI_SUFFIXES if suffixes is None else suffixes),
+    legacy_mode = provider_profiles is None
+    routing = (
+        [
+            {
+                "id": "openai",
+                "group_name": group_name,
+                "domain_suffixes": list(DEFAULT_AI_SUFFIXES if suffixes is None else suffixes),
+                "exact_domains": list(exact_domains or []),
+            }
+        ]
+        if provider_profiles is None
+        else provider_profiles
     )
     changes: list[str] = []
     if group_created:
         changes.append("create_groups_enhancement")
     if rules_created:
         changes.append("create_rules_enhancement")
-    if group_added:
-        changes.append("add_ai_select_group")
-    changes.extend(f"add_domain_suffix:{suffix}" for suffix in suffix_additions)
+    for provider in routing:
+        provider_id = str(provider.get("id") or "provider")
+        provider_group = str(provider.get("group_name") or "")
+        if not provider_group:
+            raise ProfileIntegrationError(f"provider_group_missing:{provider_id}")
+        group_added = _ensure_group(groups, provider_group)
+        suffix_additions, domain_additions = _ensure_rules(
+            rules,
+            provider_group,
+            list(provider.get("domain_suffixes", [])),
+            list(provider.get("exact_domains", [])),
+        )
+        if group_added:
+            changes.append(
+                "add_ai_select_group" if legacy_mode else f"add_provider_select_group:{provider_id}"
+            )
+        changes.extend(
+            (
+                f"add_domain_suffix:{suffix}"
+                if legacy_mode
+                else f"add_domain_suffix:{provider_id}:{suffix}"
+            )
+            for suffix in suffix_additions
+        )
+        changes.extend(
+            (f"add_domain:{domain}" if legacy_mode else f"add_domain:{provider_id}:{domain}")
+            for domain in domain_additions
+        )
     plan = ProfilePlan(
         clash_root=root,
         profiles_path=profiles_path,
@@ -296,11 +350,15 @@ def preview_profile_integration(
     *,
     group_name: str = DEFAULT_GROUP_NAME,
     suffixes: list[str] | None = None,
+    exact_domains: list[str] | None = None,
+    provider_profiles: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     return prepare_profile_integration(
         clash_root,
         group_name=group_name,
         suffixes=suffixes,
+        exact_domains=exact_domains,
+        provider_profiles=provider_profiles,
     ).plan.public()
 
 
@@ -378,6 +436,8 @@ def apply_profile_integration(
     confirmation: str,
     group_name: str = DEFAULT_GROUP_NAME,
     suffixes: list[str] | None = None,
+    exact_domains: list[str] | None = None,
+    provider_profiles: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if confirmation != PROFILE_CONFIRMATION:
         raise ProfileIntegrationError("explicit_confirmation_required")
@@ -385,6 +445,8 @@ def apply_profile_integration(
         clash_root,
         group_name=group_name,
         suffixes=suffixes,
+        exact_domains=exact_domains,
+        provider_profiles=provider_profiles,
     )
     if prepared.plan.already_configured:
         return {

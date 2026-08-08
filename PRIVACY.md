@@ -14,12 +14,19 @@ Operational probes are intentionally explicit:
 | `api.openai.com` | `/v1/models` | Validate a real OpenAI JSON authentication response | selected AI proxy |
 | `auth.openai.com` | OIDC discovery | Validate authentication reachability and issuer | selected AI proxy |
 | `chatgpt.com` | `/` | Validate web reachability; browser challenge is soft | selected AI proxy |
+| `ws.chatgpt.com` | `/` | Validate ChatGPT TCP/TLS/HTTP transport | selected OpenAI proxy |
+| `www.workbuddy.cn` | `/work/` | Disabled bootstrap probe for WorkBuddy (China) | selected WorkBuddy proxy when enabled |
+| `www.kimi.com` | `/` | Disabled bootstrap probe for Kimi | selected Kimi proxy when enabled |
+| `chat.minimaxi.com` | `/` | Disabled bootstrap probe for MiniMax | selected MiniMax proxy when enabled |
+| `mavislabs.ai` | `/` | Disabled bootstrap probe for Mavis | selected Mavis proxy when enabled |
 | `captive.apple.com` | captive portal page | Distinguish local-network failure | direct |
 | `1.1.1.1` | Cloudflare trace | Second direct-network signal | direct |
 | `api.ip.sb` | GeoIP JSON | Observe candidate exit IP, region, and ASN | isolated candidate proxy |
 
-Raw response bodies are used in memory only for validation and are not written
-to logs. Operators can replace probe URLs in the local config.
+Non-OpenAI bootstrap probes are not contacted until their Provider is enabled
+or a user/agent explicitly runs its read-only path check. Raw response bodies
+are used in memory only for validation and are not written to logs. Operators
+can replace or extend probe URLs in the local private overlay.
 
 The plugin launcher may access GitHub and the configured Python package index
 on first bootstrap through `uv`. After the command is installed, normal MCP
@@ -31,6 +38,8 @@ Default locations:
 
 - config and state:
   `~/Library/Application Support/Mihomo AI Failover/`
+- private Provider overlay:
+  `~/Library/Application Support/Mihomo AI Failover/providers.local.yaml`
 - backups:
   `~/Library/Application Support/Mihomo AI Failover/backups/`
 - logs:
@@ -44,16 +53,29 @@ Local state may contain:
 - time-limited user-confirmed browser status, sanitized reason, and the exit
   fingerprint to which that feedback applies;
 - sanitized error categories.
+- operator-approved exact Provider hostnames and probe endpoints in the private
+  overlay.
+- a timestamp and Provider ID used only to deduplicate an airport-wide Toast
+  across local Provider state machines.
 
 Local state must not contain proxy server addresses, proxy passwords,
-subscription URLs, raw OpenAI responses, or the Mihomo controller secret.
+subscription URLs, raw Provider responses, or the Mihomo controller secret.
 Runtime directories are user-only and runtime files are excluded from Git.
+
+The read-only discovery workflow samples Mihomo's local connection API. It
+keeps only normalized hostnames, process basenames, evidence categories, and
+sample counts in memory. It never returns URL paths, connection IDs, remote
+IPs, chains, credentials, or full node definitions. Nothing is persisted until
+the operator authorizes a private overlay write.
 
 ## MCP output
 
 The stdio MCP server does not open a network listener. It never returns exit
 IPs, controller secrets, subscriptions, proxy credentials, or full proxy
 definitions. Node names are hidden unless a caller explicitly opts in.
+The dedicated discovery tool may return sanitized observed hostnames because
+that is its explicit purpose; temporal-only hosts are hidden by default and
+never auto-recommended.
 
 ## Deletion
 
