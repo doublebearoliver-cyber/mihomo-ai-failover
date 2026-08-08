@@ -19,7 +19,7 @@ from mihomo_ai_failover.service import SERVICE_UNINSTALL_CONFIRMATION
 
 ROOT = Path(__file__).parents[1]
 PLUGIN = ROOT / "plugins" / "mihomo-ai-failover"
-SKILL = PLUGIN / "skills" / "openai-network-failover" / "SKILL.md"
+SKILL = PLUGIN / "skills" / "mihomo-ai-failover" / "SKILL.md"
 
 READ_ONLY_TOOLS = {
     "diagnose_environment",
@@ -76,10 +76,10 @@ def test_skill_frontmatter_and_marketplaces_reference_real_plugin() -> None:
     text = SKILL.read_text(encoding="utf-8")
     _, frontmatter, _ = text.split("---", 2)
     metadata = yaml.safe_load(frontmatter)
-    assert metadata["name"] == "openai-network-failover"
-    assert "Diagnose" in metadata["description"]
-    assert metadata["license"] == "MIT"
-    assert "macOS" in metadata["metadata"]["compatibility"]
+    assert set(metadata) == {"name", "description"}
+    assert metadata["name"] == "mihomo-ai-failover"
+    for search_term in ("ChatGPT", "Codex", "Clash Verge Rev", "Mihomo", "login"):
+        assert search_term in metadata["description"]
 
     codex_market = _json(ROOT / ".agents" / "plugins" / "marketplace.json")
     claude_market = _json(ROOT / ".claude-plugin" / "marketplace.json")
@@ -94,13 +94,14 @@ def test_agent_contract_is_discoverable_and_covers_every_mcp_tool() -> None:
     integration = (ROOT / "docs" / "agent-integration.md").read_text(encoding="utf-8")
     plugin_readme = (PLUGIN / "README.md").read_text(encoding="utf-8")
 
-    canonical_path = "plugins/mihomo-ai-failover/skills/openai-network-failover/SKILL.md"
+    canonical_path = "plugins/mihomo-ai-failover/skills/mihomo-ai-failover/SKILL.md"
     for readme in ("README.md", "README.zh-CN.md"):
         text = (ROOT / readme).read_text(encoding="utf-8")
         assert canonical_path in text
         assert "docs/agent-integration.md" in text
+        assert "--skill mihomo-ai-failover --agent codex --global --yes" in text
 
-    assert "skills/openai-network-failover/SKILL.md" in plugin_readme
+    assert "skills/mihomo-ai-failover/SKILL.md" in plugin_readme
     for heading in (
         "## When to use this skill",
         "## Authority and trust",
@@ -135,3 +136,16 @@ def test_agent_contract_preserves_failover_and_privacy_boundaries() -> None:
     references = SKILL.parent / "references"
     assert (references / "provider-adaptation.md").is_file()
     assert (references / "public-profiles.md").is_file()
+
+
+def test_deprecated_skill_name_is_not_published() -> None:
+    deprecated = "openai-network-failover"
+    checked_files = (
+        ROOT / "README.md",
+        ROOT / "README.zh-CN.md",
+        ROOT / "docs" / "agent-integration.md",
+        PLUGIN / "README.md",
+        SKILL,
+    )
+    for path in checked_files:
+        assert deprecated not in path.read_text(encoding="utf-8")

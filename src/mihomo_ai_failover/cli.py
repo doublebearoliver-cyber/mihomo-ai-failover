@@ -53,7 +53,7 @@ def _add_config_argument(parser: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="mihomo-ai-failover",
-        description="Provider-scoped AI failover for Mihomo on macOS",
+        description="Automatic ChatGPT, Codex, and AI proxy failover for Mihomo on macOS",
     )
     subparsers = parser.add_subparsers(dest="command")
 

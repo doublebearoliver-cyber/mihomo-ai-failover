@@ -3,7 +3,7 @@
 ## Canonical agent contract
 
 Every model must read
-[`plugins/mihomo-ai-failover/skills/openai-network-failover/SKILL.md`](../plugins/mihomo-ai-failover/skills/openai-network-failover/SKILL.md)
+[`plugins/mihomo-ai-failover/skills/mihomo-ai-failover/SKILL.md`](../plugins/mihomo-ai-failover/skills/mihomo-ai-failover/SKILL.md)
 in full before using the MCP server. That `SKILL.md` is the canonical
 machine-facing workflow and safety contract.
 
@@ -32,12 +32,11 @@ The package exposes:
 
 - `mihomo-ai-failover`: CLI and daemon;
 - `mihomo-ai-failover-mcp`: local stdio MCP server;
-- `openai-network-failover`: shared Codex and Claude Code skill.
+- `mihomo-ai-failover`: shared Codex and Claude Code Skill.
 
-The skill name is retained for version-0.x compatibility; its current contract
-covers OpenAI, WorkBuddy (China), Kimi, MiniMax, and Mavis. Provider-specific
-adaptation details live in the skill's `references/` directory so the primary
-workflow stays concise.
+Its current contract covers OpenAI, WorkBuddy (China), Kimi, MiniMax, and
+Mavis. Provider-specific adaptation details live in the Skill's `references/`
+directory so the primary workflow stays concise.
 
 The plugin is under `plugins/mihomo-ai-failover/`. Codex and Claude use their
 own manifests but the same `.mcp.json`, launcher, and skill.

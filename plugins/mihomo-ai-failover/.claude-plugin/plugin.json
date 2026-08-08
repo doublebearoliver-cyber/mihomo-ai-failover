@@ -1,7 +1,7 @@
 {
   "name": "mihomo-ai-failover",
-  "version": "0.2.0",
-  "description": "Diagnose and operate Provider-scoped AI failover for Mihomo on macOS.",
+  "version": "0.2.1",
+  "description": "Automatic ChatGPT, Codex, and multi-provider AI proxy failover for Mihomo on macOS.",
   "author": {
     "name": "Oliver",
     "url": "https://github.com/doublebearoliver-cyber"
@@ -12,8 +12,15 @@
   "keywords": [
     "mihomo",
     "clash-verge",
+    "clash-verge-rev",
     "chatgpt",
     "codex",
+    "workbuddy",
+    "kimi",
+    "minimax",
+    "mavis",
+    "agent-skills",
+    "network-resilience",
     "failover",
     "macos"
   ],

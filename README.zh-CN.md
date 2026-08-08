@@ -1,20 +1,20 @@
-# Mihomo AI Failover
+# Mihomo AI Failover — ChatGPT、Codex 与多模型代理自动容灾
 
 面向 macOS、Clash Verge Rev 和 Mihomo 的多 AI Provider 自动容灾工具。
 它保留仍然可用的当前节点，不做“延迟最低优先”；只有某个 Provider
 的真实路径连续出现两轮可验证硬故障，才切换该 Provider 自己的代理组。
 
-> 当前版本：`0.2.0` 公开预览。默认只启用 OpenAI；WorkBuddy（国内版）、
+> 当前版本：`0.2.1` 公开预览。默认只启用 OpenAI；WorkBuddy（国内版）、
 > Kimi、MiniMax 和 Mavis 必须先在本机发现并审核真实连接，再单独启用。
 > 默认继续使用 macOS 系统代理，不启用 TUN。
 
 [English](README.md) ·
-[AI 使用契约](plugins/mihomo-ai-failover/skills/openai-network-failover/SKILL.md) ·
+[AI 使用契约](plugins/mihomo-ai-failover/skills/mihomo-ai-failover/SKILL.md) ·
 [Agent 接入](docs/agent-integration.md) · [架构](docs/architecture.md) ·
 [验收清单](docs/validation.md)
 
 > **AI Agent 在调用任何 MCP 工具前，必须先完整读取
-> [`openai-network-failover` Skill](plugins/mihomo-ai-failover/skills/openai-network-failover/SKILL.md)。**
+> [`mihomo-ai-failover` Skill](plugins/mihomo-ai-failover/skills/mihomo-ai-failover/SKILL.md)。**
 > 这是面向模型的权威使用契约，定义了适用环境、安全边界、工具顺序、停止条件
 > 和结果输出要求；不能只根据本 README 自行操作。
 
@@ -129,11 +129,29 @@ GitHub、Git、npm、Docker、Cloudflare/Google 等共享基础设施和普通�
 
 ## 安装
 
+先用官方 `skills` CLI 安装 Agent Skill：
+
+```bash
+npx --yes skills@latest add doublebearoliver-cyber/mihomo-ai-failover \
+  --skill mihomo-ai-failover --agent codex --global --yes
+```
+
+如果某个客户端无法从仓库缩写发现嵌套 Skill，可直接使用规范目录地址：
+
+```bash
+npx --yes skills@latest add \
+  https://github.com/doublebearoliver-cyber/mihomo-ai-failover/tree/main/plugins/mihomo-ai-failover/skills/mihomo-ai-failover \
+  --skill mihomo-ai-failover --agent codex --global --yes
+```
+
+Skill 只提供 Agent 指令和安全边界，不会自动安装本机 CLI/MCP 运行时。需要
+真实诊断或操作这台 Mac 时，还必须安装下面的运行时。
+
 推荐从固定版本安装独立 Python 环境：
 
 ```bash
 uv tool install \
-  'mihomo-ai-failover[mcp] @ git+https://github.com/doublebearoliver-cyber/mihomo-ai-failover@v0.2.0'
+  'mihomo-ai-failover[mcp] @ git+https://github.com/doublebearoliver-cyber/mihomo-ai-failover@v0.2.1'
 ```
 
 先只读诊断和预览：
@@ -173,9 +191,9 @@ codex plugin marketplace add doublebearoliver-cyber/mihomo-ai-failover
 codex plugin add mihomo-ai-failover@mihomo-ai-failover
 ```
 
-插件提供 `openai-network-failover` Skill 和本地 stdio MCP。启动器优先
+插件提供 `mihomo-ai-failover` Skill 和本地 stdio MCP。启动器优先
 复用已安装的 `mihomo-ai-failover-mcp`；找不到时才通过 `uv` 从固定
-`v0.2.0` 标签获取。它不会开启 TCP 监听。
+`v0.2.1` 标签获取。它不会开启 TCP 监听。
 
 ## Claude Code 插件
 
@@ -256,7 +274,7 @@ mihomo-ai-failover provider-overlay-apply \
 `profile-install --confirm APPLY_PROFILE_INTEGRATION`，按结果重启 Clash Verge，
 然后执行 `check --provider kimi`、`inventory --provider kimi` 和
 `service-start`。完整 Agent 工作流见
-[Skill 的 Provider 适配参考](plugins/mihomo-ai-failover/skills/openai-network-failover/references/provider-adaptation.md)。
+[Skill 的 Provider 适配参考](plugins/mihomo-ai-failover/skills/mihomo-ai-failover/references/provider-adaptation.md)。
 
 真实浏览器反馈是显式写操作。先停止监控，确认浏览器结果，再记录并重启：
 

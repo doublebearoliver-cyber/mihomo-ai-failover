@@ -1,16 +1,15 @@
 # Mihomo AI Failover plugin
 
 This plugin exposes the local failover CLI through a stdio MCP server and adds
-the `openai-network-failover` skill to Codex and Claude Code.
+the `mihomo-ai-failover` Skill to Codex and Claude Code.
 
-The legacy skill name remains for version-0.x compatibility. Its current
-contract covers isolated profiles for OpenAI, WorkBuddy (China), Kimi, MiniMax,
-and Mavis, plus private local adaptation from observed Mihomo traffic.
+Its contract covers isolated profiles for OpenAI, WorkBuddy (China), Kimi,
+MiniMax, and Mavis, plus private local adaptation from observed Mihomo traffic.
 
 ## Agent entrypoint
 
 Before calling any MCP tool, read
-[`skills/openai-network-failover/SKILL.md`](skills/openai-network-failover/SKILL.md)
+[`skills/mihomo-ai-failover/SKILL.md`](skills/mihomo-ai-failover/SKILL.md)
 in full. It is the canonical agent contract for:
 
 - when this plugin should and should not be used;

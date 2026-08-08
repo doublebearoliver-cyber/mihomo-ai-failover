@@ -1,9 +1,6 @@
 ---
-name: openai-network-failover
-description: Diagnose and operate Provider-scoped AI failover on a Mac using Clash Verge and Mihomo. Use for ChatGPT, Codex, WorkBuddy (China), Kimi, MiniMax, or Mavis connectivity; local Provider-domain discovery; independent AI proxy groups; or safe preview, install, start, stop, and rollback workflows.
-license: MIT
-metadata:
-  compatibility: Requires macOS, Clash Verge Rev with Mihomo, and trusted local access to the mihomo-ai-failover stdio MCP server.
+name: mihomo-ai-failover
+description: Diagnose and safely operate automatic proxy failover for ChatGPT, Codex, WorkBuddy (China), Kimi, MiniMax, and Mavis on macOS with Clash Verge Rev and Mihomo. Use when AI login fails, ChatGPT will not load, Codex spins or reports network errors, streaming stalls, or the user needs verified hard-failure detection, stable node switching, Provider-specific routing, local domain discovery, installation, rollback, or recovery.
 ---
 
 # Mihomo AI Provider failover
@@ -12,7 +9,6 @@ Use the local `mihomo-ai-failover` MCP tools. The CLI and daemon are
 authoritative for live state and operations; this skill is the canonical
 machine-facing workflow and safety contract.
 
-The skill name remains `openai-network-failover` for version-0.x compatibility.
 OpenAI is enabled by default. Every other public Provider template is disabled
 until local evidence has been reviewed and the user authorizes a private
 overlay and persistent profile update.
@@ -34,6 +30,20 @@ Do not use it for general VPN tuning, fastest-node selection, global proxy
 changes, unrelated GitHub/npm/Docker failures, arbitrary website monitoring,
 non-Mihomo clients, or a remote Mac that the agent cannot reach through a
 trusted local MCP client.
+
+## Check runtime access before tools
+
+This Skill is an operating contract, not the failover runtime itself. Before
+following a tool workflow, check whether the trusted local
+`mihomo-ai-failover` stdio MCP server and its tools are actually available.
+
+- If the MCP tools are available, start with the read-only workflow below.
+- If the tools are unavailable, do not claim that this Mac was diagnosed and
+  do not silently install anything. Report the missing local dependency and
+  direct the user to the repository root README for the pinned runtime or
+  plugin installation.
+- A cloud-only model cannot reach the user's Mihomo controller. It may explain
+  the workflow, but it must stop before claiming live state or making changes.
 
 ## Authority and trust
 
