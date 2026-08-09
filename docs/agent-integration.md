@@ -85,7 +85,8 @@ on model instructions.
 
 | Signal | Agent interpretation |
 | --- | --- |
-| Two consecutive verified hard-failure rounds on one Provider route | Only that Provider's daemon may evaluate failover after the per-round hard-target retry plus local-network and controller guards |
+| Two verified rounds covering at least two distinct critical targets | Only that Provider's daemon may evaluate the fast failover gate after per-round retry plus local-network and controller guards |
+| One critical target repeatedly fails | Observe at least three rounds and 30 seconds; do not treat two isolated timeouts as fast-failover evidence |
 | TCP/TLS failure, timeout, reset, or verified unavailable/region response | Hard-failure evidence when classified by the health checker |
 | One failed probe, small latency change, or a slow response | Soft anomaly; observe, do not switch |
 | An AI client spins or temporarily has no output | Auxiliary symptom only |
@@ -94,9 +95,9 @@ on model instructions.
 | GitHub, Git, npm, Docker, shared infrastructure, or an ordinary website fails | Outside every Provider failover trigger |
 
 `run_health_check` is a snapshot and never switches nodes. Use sanitized recent
-events to understand a sequence; do not manufacture a two-failure sequence from
-one result. The first verified hard-failure round may start isolated candidate
-preparation, but it does not authorize a live switch.
+events to understand a sequence; do not manufacture a failure sequence from
+one result. The first verified hard-failure round confirms only the selected
+route and does not authorize candidate deep scans or a live switch.
 
 ## Mutation policy
 

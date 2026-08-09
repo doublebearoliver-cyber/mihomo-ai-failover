@@ -39,6 +39,10 @@ def test_default_config_discovers_runtime_port_and_socket(tmp_path: Path) -> Non
     assert config["web_feedback_confirmed_ttl_seconds"] == 604800
     assert config["web_feedback_rejected_ttl_seconds"] == 86400
     assert config["candidate_reverification_delay_seconds"] == 3
+    assert config["single_target_failure_rounds_before_switch"] == 3
+    assert config["single_target_observation_seconds"] == 30
+    assert config["connection_drain_mode"] == "preserve"
+    assert config["candidate_prefilter_limit"] == 8
 
 
 def test_config_round_trip_expands_home_without_secrets(tmp_path: Path) -> None:
@@ -71,6 +75,21 @@ def test_config_requires_two_failure_rounds() -> None:
     config = default_config(home=Path("/tmp/mihomo-ai-failover-test"))
     config["failure_rounds_before_switch"] = 1
     with pytest.raises(ConfigError, match="at_least_2"):
+        validate_config(config)
+
+
+def test_config_rejects_unsafe_connection_drain_mode() -> None:
+    config = default_config(home=Path("/tmp/mihomo-ai-failover-test"))
+    config["connection_drain_mode"] = "force"
+    with pytest.raises(ConfigError, match="connection_drain_mode"):
+        validate_config(config)
+
+
+def test_single_target_rounds_must_cover_fast_rounds() -> None:
+    config = default_config(home=Path("/tmp/mihomo-ai-failover-test"))
+    config["failure_rounds_before_switch"] = 4
+    config["single_target_failure_rounds_before_switch"] = 3
+    with pytest.raises(ConfigError, match="single_target_failure_rounds"):
         validate_config(config)
 
 

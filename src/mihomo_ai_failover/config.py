@@ -157,11 +157,15 @@ def default_config(
         ),
         "monitor_interval_seconds": 10,
         "failure_rounds_before_switch": 2,
+        "single_target_failure_rounds_before_switch": 3,
+        "single_target_observation_seconds": 30,
+        "fast_failover_min_distinct_targets": 2,
         "failure_confirmation_min_gap_seconds": 8,
         "hard_probe_retry_count": 1,
         "hard_probe_retry_delay_seconds": 1,
         "parallel_failure_confirmation": True,
         "switch_connection_wait_seconds": 3,
+        "connection_drain_mode": "preserve",
         "max_candidate_attempts_per_failover": 2,
         "candidate_retry_backoff_seconds": 30,
         "cooldown_first_seconds": 300,
@@ -183,28 +187,28 @@ def default_config(
         "candidate_preflight_timeout_ms": 4000,
         "candidate_commit_preflight_timeout_ms": 2000,
         "candidate_reverification_delay_seconds": 3,
-        "candidate_concurrency": 8,
-        "candidate_prefilter_limit": 24,
-        "candidate_prefilter_batch_size": 8,
-        "candidate_prepare_count": 3,
-        "candidate_isolated_parallelism": 3,
+        "candidate_concurrency": 3,
+        "candidate_prefilter_limit": 8,
+        "candidate_prefilter_batch_size": 4,
+        "candidate_prepare_count": 2,
+        "candidate_isolated_parallelism": 2,
         "candidate_validation_samples_required": 2,
-        "candidate_validation_window_seconds": 120,
+        "candidate_validation_window_seconds": 3600,
         "candidate_validation_min_gap_seconds": 5,
-        "candidate_validation_fresh_seconds": 30,
+        "candidate_validation_fresh_seconds": 60,
         "probation_seconds": 60,
         "active_preflight_interval_seconds": 10,
-        "active_preflight_batch_size": 4,
-        "active_full_scan_interval_seconds": 120,
+        "active_preflight_batch_size": 2,
+        "active_full_scan_interval_seconds": 300,
         "active_full_scan_batch_size": 2,
-        "warm_scan_interval_seconds": 300,
-        "warm_scan_batch_size": 2,
-        "pool_refill_interval_seconds": 60,
-        "pool_refill_batch_size": 2,
+        "warm_scan_interval_seconds": 600,
+        "warm_scan_batch_size": 1,
+        "pool_refill_interval_seconds": 600,
+        "pool_refill_batch_size": 1,
         "cold_scan_interval_seconds": 21600,
-        "cold_scan_batch_size": 4,
+        "cold_scan_batch_size": 2,
         "catalog_refresh_interval_seconds": 300,
-        "initial_deep_scan_max": 80,
+        "initial_deep_scan_max": 40,
         "geo_probe_url": "https://api.ip.sb/geoip",
         "geo_probe_timeout_seconds": 6,
         "mcp_allow_mutations": False,
@@ -355,6 +359,14 @@ def load_config(
 def validate_config(config: dict[str, Any]) -> None:
     if int(config.get("failure_rounds_before_switch", 0)) < 2:
         raise ConfigError("failure_rounds_before_switch_must_be_at_least_2")
+    if int(config.get("single_target_failure_rounds_before_switch", 0)) < int(
+        config["failure_rounds_before_switch"]
+    ):
+        raise ConfigError("single_target_failure_rounds_must_cover_fast_rounds")
+    if int(config.get("single_target_observation_seconds", 0)) < 1:
+        raise ConfigError("single_target_observation_seconds_must_be_positive")
+    if int(config.get("fast_failover_min_distinct_targets", 0)) < 2:
+        raise ConfigError("fast_failover_min_distinct_targets_must_be_at_least_2")
     interval = float(config.get("monitor_interval_seconds", 0))
     if interval < 5:
         raise ConfigError("monitor_interval_seconds_must_be_at_least_5")
@@ -378,6 +390,11 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ConfigError("candidate_commit_preflight_timeout_ms_must_be_at_least_500")
     if float(config.get("candidate_reverification_delay_seconds", -1)) < 0:
         raise ConfigError("candidate_reverification_delay_seconds_must_not_be_negative")
+    if str(config.get("connection_drain_mode") or "") not in {
+        "preserve",
+        "replacement_only",
+    }:
+        raise ConfigError("connection_drain_mode_invalid")
     if int(config.get("candidate_validation_samples_required", 0)) < 2:
         raise ConfigError("candidate_validation_samples_required_must_be_at_least_2")
     if int(config.get("candidate_validation_min_gap_seconds", 0)) < 1:

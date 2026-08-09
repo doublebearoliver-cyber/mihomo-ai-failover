@@ -40,19 +40,21 @@ fixtures.
 
 `simulate_failover` verifies without touching the live proxy:
 
-- two aggregate hard-failure rounds are required;
-- default first-failure timing remains at most 30 seconds;
+- two distinct-target hard-failure rounds open the fast gate;
+- one repeatedly failing target requires at least three rounds and 30 seconds;
+- prepared-candidate multi-signal timing remains at most 30 seconds;
 - a different observed exit is preferred;
-- candidate preparation overlaps the confirmation window;
+- an isolated first failure does not start candidate preparation;
+- connection draining defaults to preserving old Provider connections;
 - no live selection is changed.
 
 Unit tests additionally cover:
 
 - hard/soft response classification;
 - targeted retry that suppresses a transient single-request hard failure;
-- aggregate failure rounds across different critical targets and minimum-gap
+- adaptive multi-target/single-target failure gates and minimum-gap
   enforcement;
-- candidate preparation concurrent with the second confirmation round;
+- no candidate scan after an isolated first failure;
 - local-network guard;
 - two-sample candidate eligibility, freshness, ordering, and duplicate-exit
   removal;
@@ -68,8 +70,8 @@ Unit tests additionally cover:
 - failed commit preflight that does not consume the bounded live-selection
   budget;
 - bounded rotating maintenance and scan pause during a failover episode;
-- stale AI connection closure across all old chains while preserving ordinary
-  and already-correct connections;
+- default preservation of old Provider connections and replacement-only cleanup
+  when a newer same-process route exists;
 - IPv6/DNS/hosts probe-stack invalidation;
 - all-unavailable single notification and backoff;
 - persistent profile backup, rollback, conflicts, and path escape;
@@ -91,14 +93,15 @@ Only run this after a backup and explicit operator approval:
 2. Choose exactly one Provider and, in its dedicated group, manually select a
    known non-working test node.
 3. Record the first verified hard failure time.
-4. Confirm the monitor does not switch after only one failure, while candidate
-   preparation begins in the isolated scanner.
-5. Confirm it selects a verified distinct exit within 20-30 seconds of the
-   first failure.
-6. Confirm the live-route verification passes before stale connections close.
-7. Confirm only stale connections matching that Provider and not using the new
-   node are closed, while ordinary traffic, other Providers, and
-   already-correct connections remain.
+4. Confirm the monitor does not switch or start candidate deep scans after one
+   isolated failure.
+5. For two distinct critical failures, confirm it selects a verified distinct
+   exit within the prepared-candidate timing budget. For one repeated target,
+   confirm it observes at least three rounds and 30 seconds first.
+6. Confirm the live-route verification passes before the switch commits.
+7. In default `preserve` mode, confirm active old Provider connections are not
+   deleted; new connections use the new node while ordinary traffic and other
+   Providers remain unchanged.
 8. Confirm the new node remains selected through the 60-second probation and
    there is no proactive switch-back.
 9. Repeat with a candidate that passes isolated validation but fails the live

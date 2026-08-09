@@ -31,6 +31,7 @@ class FakeController:
         self.current = current
         self.selections = []
         self.deleted = []
+        self.drain_calls = []
 
     def proxies(self):
         return {
@@ -51,9 +52,16 @@ class FakeController:
         del node, url, timeout_ms, expected
         return None
 
-    def close_stale_ai_connections(self, new_node, suffixes):
-        del new_node, suffixes
-        return 0
+    def drain_ai_connections(self, new_node, suffixes, exact_domains=(), mode="preserve"):
+        self.drain_calls.append((new_node, tuple(suffixes), tuple(exact_domains), mode))
+        return {
+            "mode": mode,
+            "provider_connections": 0,
+            "new_connections": 0,
+            "old_connections": 0,
+            "closed": 0,
+            "preserved": 0,
+        }
 
 
 class ProbeClassificationTests(unittest.TestCase):
@@ -355,7 +363,7 @@ class DomainAndConnectionTests(unittest.TestCase):
         self.assertFalse(WATCHDOG.host_matches_suffixes("registry.npmjs.org", suffixes))
         self.assertFalse(WATCHDOG.host_matches_suffixes("google.com", suffixes))
 
-    def test_close_only_old_ai_connections(self):
+    def test_preserve_mode_never_closes_old_provider_connections(self):
         calls = []
 
         class Controller(WATCHDOG.ClashController):
@@ -387,13 +395,16 @@ class DomainAndConnectionTests(unittest.TestCase):
                 calls.append((method, path))
                 return {}
 
-        closed = Controller().close_old_ai_connections(
-            "旧节点", load_settings()["ai_domain_suffixes"]
+        result = Controller().drain_ai_connections(
+            "新节点",
+            load_settings()["ai_domain_suffixes"],
+            mode="preserve",
         )
-        self.assertEqual(closed, 1)
-        self.assertEqual(calls, [("DELETE", "/connections/old-ai")])
+        self.assertEqual(result["closed"], 0)
+        self.assertEqual(result["preserved"], 1)
+        self.assertEqual(calls, [])
 
-    def test_close_all_stale_ai_connections_but_keep_new_and_github(self):
+    def test_replacement_only_closes_exact_replacement_but_keeps_orphan_and_github(self):
         calls = []
 
         class Controller(WATCHDOG.ClashController):
@@ -407,8 +418,14 @@ class DomainAndConnectionTests(unittest.TestCase):
                         "connections": [
                             {
                                 "id": "old-ai",
-                                "metadata": {"host": "chatgpt.com"},
+                                "metadata": {
+                                    "host": "chatgpt.com",
+                                    "processPath": "/Applications/Codex.app",
+                                    "network": "tcp",
+                                    "destinationPort": "443",
+                                },
                                 "chains": ["旧节点", "🤖 AI稳定出口"],
+                                "start": "2026-08-09T10:00:00Z",
                             },
                             {
                                 "id": "older-ai",
@@ -417,8 +434,14 @@ class DomainAndConnectionTests(unittest.TestCase):
                             },
                             {
                                 "id": "new-ai",
-                                "metadata": {"host": "api.openai.com"},
+                                "metadata": {
+                                    "host": "chatgpt.com",
+                                    "processPath": "/Applications/Codex.app",
+                                    "network": "tcp",
+                                    "destinationPort": "443",
+                                },
                                 "chains": ["新节点", "🤖 AI稳定出口"],
+                                "start": "2026-08-09T10:01:00Z",
                             },
                             {
                                 "id": "github",
@@ -430,17 +453,14 @@ class DomainAndConnectionTests(unittest.TestCase):
                 calls.append((method, path))
                 return {}
 
-        closed = Controller().close_stale_ai_connections(
-            "新节点", load_settings()["ai_domain_suffixes"]
+        result = Controller().drain_ai_connections(
+            "新节点",
+            load_settings()["ai_domain_suffixes"],
+            mode="replacement_only",
         )
-        self.assertEqual(closed, 2)
-        self.assertEqual(
-            calls,
-            [
-                ("DELETE", "/connections/old-ai"),
-                ("DELETE", "/connections/older-ai"),
-            ],
-        )
+        self.assertEqual(result["closed"], 1)
+        self.assertEqual(result["preserved"], 1)
+        self.assertEqual(calls, [("DELETE", "/connections/old-ai")])
 
 
 class PoolTests(unittest.TestCase):
@@ -908,9 +928,47 @@ class SwitchingGuardTests(unittest.TestCase):
         )
         second_candidate_upper_bound = first_candidate_upper_bound + candidate_commit_budget
         self.assertEqual(config["failure_rounds_before_switch"], 2)
-        self.assertEqual(config["candidate_prepare_count"], 3)
+        self.assertEqual(config["candidate_prepare_count"], 2)
+        self.assertEqual(config["single_target_failure_rounds_before_switch"], 3)
+        self.assertEqual(config["connection_drain_mode"], "preserve")
         self.assertLessEqual(first_candidate_upper_bound, 20)
         self.assertLessEqual(second_candidate_upper_bound, 30)
+
+    def test_single_target_gate_opens_only_after_three_rounds_and_observation(self):
+        config = load_settings()
+        state = WATCHDOG.default_state()
+        monitor = state["monitor"]
+        monitor.update(
+            {
+                "first_failure_at": 1_000,
+                "consecutive_hard_failures": 3,
+                "hard_failure_round_targets": [
+                    ["openai_api"],
+                    ["openai_api"],
+                    ["openai_api"],
+                ],
+            }
+        )
+        early = WATCHDOG.failure_gate(monitor, config, 1_029)
+        ready = WATCHDOG.failure_gate(monitor, config, 1_030)
+        self.assertFalse(early["ready"])
+        self.assertTrue(ready["ready"])
+        self.assertEqual(ready["mode"], "single_target")
+
+    def test_two_distinct_targets_open_fast_gate_after_two_rounds(self):
+        config = load_settings()
+        state = WATCHDOG.default_state()
+        monitor = state["monitor"]
+        monitor.update(
+            {
+                "first_failure_at": 1_000,
+                "consecutive_hard_failures": 2,
+                "hard_failure_round_targets": [["openai_api"], ["openai_auth"]],
+            }
+        )
+        gate = WATCHDOG.failure_gate(monitor, config, 1_008)
+        self.assertTrue(gate["ready"])
+        self.assertEqual(gate["mode"], "multi_signal")
 
     def test_different_targets_form_two_consecutive_hard_rounds(self):
         config = load_settings()
@@ -971,7 +1029,7 @@ class SwitchingGuardTests(unittest.TestCase):
         failover.assert_called_once()
         self.assertEqual(fake.selections, [])
 
-    def test_same_target_switches_after_second_hard_failure(self):
+    def test_same_target_waits_after_second_hard_failure(self):
         config = load_settings()
         config.update(
             {
@@ -1032,7 +1090,7 @@ class SwitchingGuardTests(unittest.TestCase):
                         "classification": "healthy",
                     }
                 ],
-            ),
+            ) as prepare,
         ):
             state_path = Path(directory) / "state.json"
             log_path = Path(directory) / "monitor.jsonl"
@@ -1045,11 +1103,14 @@ class SwitchingGuardTests(unittest.TestCase):
                 log_path,
             )
 
-        self.assertEqual(result["status"], "switched")
-        self.assertEqual(controller.current, "节点A")
-        self.assertEqual(len(controller.selections), 1)
+        self.assertEqual(result["status"], "waiting_confirmation")
+        self.assertEqual(result["gate"]["mode"], "single_target")
+        self.assertEqual(result["gate"]["required_rounds"], 3)
+        self.assertEqual(controller.current, "节点B")
+        self.assertEqual(controller.selections, [])
+        prepare.assert_not_called()
 
-    def test_candidate_preparation_overlaps_confirmation_and_recovery_cancels_episode(self):
+    def test_first_failure_does_not_scan_candidates_and_recovery_cancels_episode(self):
         config = load_settings()
         config["failure_confirmation_min_gap_seconds"] = 0
         state = WATCHDOG.default_state()
@@ -1064,20 +1125,6 @@ class SwitchingGuardTests(unittest.TestCase):
             "median_ms": None,
             "probes": {},
         }
-        preparation_started = threading.Event()
-        release_preparation = threading.Event()
-
-        def prepare(*args):
-            del args
-            preparation_started.set()
-            self.assertTrue(release_preparation.wait(1))
-            return []
-
-        def confirmation_sleep(seconds):
-            del seconds
-            self.assertTrue(preparation_started.wait(1))
-            release_preparation.set()
-
         with (
             tempfile.TemporaryDirectory() as directory,
             mock.patch.object(
@@ -1093,9 +1140,8 @@ class SwitchingGuardTests(unittest.TestCase):
             mock.patch.object(
                 WATCHDOG,
                 "prepare_failover_candidates",
-                side_effect=prepare,
-            ),
-            mock.patch.object(WATCHDOG.time, "sleep", side_effect=confirmation_sleep),
+            ) as prepare,
+            mock.patch.object(WATCHDOG.time, "sleep"),
         ):
             result = WATCHDOG.health_iteration(
                 FakeController("节点B"),
@@ -1108,6 +1154,7 @@ class SwitchingGuardTests(unittest.TestCase):
         self.assertEqual(result["status"], "healthy")
         self.assertEqual(state["monitor"]["consecutive_hard_failures"], 0)
         self.assertIsNone(state["monitor"]["failover_episode"])
+        prepare.assert_not_called()
 
     def test_commit_preflight_failure_never_selects_candidate(self):
         config = load_settings()
@@ -1293,6 +1340,8 @@ class SwitchingGuardTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(controller.current, "候选")
         self.assertEqual(route_probe.call_count, 2)
+        self.assertEqual(controller.drain_calls[0][0], "候选")
+        self.assertEqual(controller.drain_calls[0][3], "preserve")
         notify.assert_called_once()
 
     def test_failover_uses_warm_pool_when_active_pool_fails(self):

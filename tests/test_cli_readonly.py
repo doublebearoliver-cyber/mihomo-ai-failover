@@ -9,6 +9,13 @@ from mihomo_ai_failover import cli, engine
 from mihomo_ai_failover.config import default_config, write_config
 
 
+def test_cli_reports_package_version(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["--version"])
+    assert exit_info.value.code == 0
+    assert "mihomo-ai-failover 0.2.2" in capsys.readouterr().out
+
+
 @pytest.mark.parametrize("command", ["status", "check"])
 def test_read_only_core_commands_do_not_create_runtime(
     tmp_path: Path,

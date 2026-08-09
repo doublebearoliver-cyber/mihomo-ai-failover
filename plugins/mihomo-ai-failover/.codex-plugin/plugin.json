@@ -1,6 +1,6 @@
 {
   "name": "mihomo-ai-failover",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Automatic ChatGPT, Codex, and multi-provider AI proxy failover for Mihomo on macOS.",
   "author": {
     "name": "Oliver",

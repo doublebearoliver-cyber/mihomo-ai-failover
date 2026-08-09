@@ -251,19 +251,25 @@ def _simulate_invariants() -> dict[str, Any]:
     return {
         "passed": bool(
             config["failure_rounds_before_switch"] == 2
-            and config["candidate_prepare_count"] == 3
+            and config["single_target_failure_rounds_before_switch"] == 3
+            and config["candidate_prepare_count"] == 2
             and config["max_candidate_attempts_per_failover"] == 2
+            and config["connection_drain_mode"] == "preserve"
             and second_candidate_upper_bound <= 30
             and ordered == ["candidate"]
         ),
         "failure_rounds_before_switch": config["failure_rounds_before_switch"],
+        "single_target_failure_rounds_before_switch": config[
+            "single_target_failure_rounds_before_switch"
+        ],
         "upper_bound_seconds": second_candidate_upper_bound,
         "first_candidate_upper_bound_seconds": first_candidate_upper_bound,
         "upper_bound_scope": "prepared_retry_free_candidate",
         "retry_assisted_additional_upper_bound_seconds": retry_assisted_additional,
         "prepared_candidate_target": config["candidate_prepare_count"],
         "live_selection_budget": config["max_candidate_attempts_per_failover"],
-        "prevalidation_overlaps_confirmation": True,
+        "prevalidation_overlaps_confirmation": False,
+        "connection_drain_mode": config["connection_drain_mode"],
         "different_exit_preferred": ordered == ["candidate"],
         "live_proxy_changed": False,
     }
@@ -580,8 +586,9 @@ def create_server() -> Any:
     @server.tool(
         title="Simulate failover invariants",
         description=(
-            "Run an isolated deterministic simulation of the two-failure timing "
-            "and distinct-exit ranking invariants. No live proxy is changed."
+            "Run an isolated deterministic simulation of adaptive failure gates, "
+            "prepared-route timing, connection preservation, and distinct-exit "
+            "ranking. No live proxy is changed."
         ),
         annotations=read_local,
     )
