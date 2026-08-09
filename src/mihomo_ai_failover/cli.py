@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from . import engine
+from . import __version__, engine
 from .config import (
     ConfigError,
     default_config,
@@ -55,6 +55,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="mihomo-ai-failover",
         description="Automatic ChatGPT, Codex, and AI proxy failover for Mihomo on macOS",
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="command")
 
     for name, help_text in (

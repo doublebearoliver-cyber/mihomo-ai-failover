@@ -3,7 +3,7 @@
 设计边界：
 - 只切换当前 Provider 的专用组，不改变全局节点、系统代理或 TUN。
 - 当前节点健康时绝不因延迟变化切换。
-- 只有连续两轮可验证硬故障才切换。
+- 多信号故障连续两轮走快速门；单目标故障需三轮和观察窗口。
 - 节点凭据只从 Clash 运行时配置读入内存，不写入本项目状态或日志。
 """
 
@@ -157,38 +157,80 @@ class ClashController:
         delay = result.get("delay")
         return delay if isinstance(delay, int) and delay >= 0 else None
 
-    def close_old_ai_connections(
+    def drain_ai_connections(
         self,
-        old_node: str,
+        new_node: str,
         suffixes: Sequence[str],
         exact_domains: Sequence[str] = (),
-    ) -> int:
-        """只关闭仍绑定旧节点的当前 Provider 连接。"""
+        mode: str = "preserve",
+    ) -> dict[str, int | str]:
+        """安全处理切换前建立的 Provider 连接。
+
+        默认 ``preserve`` 只观察、不主动断开。``replacement_only`` 必须看到
+        同一进程、主机、网络和端口在新节点上建立了更新的连接，才关闭旧连接。
+        """
         try:
             result = self.request("GET", "/connections")
         except ControllerError:
-            return 0
-        closed = 0
+            return {
+                "mode": mode,
+                "provider_connections": 0,
+                "new_connections": 0,
+                "old_connections": 0,
+                "closed": 0,
+                "preserved": 0,
+            }
+
+        relevant: list[dict[str, Any]] = []
         for connection in result.get("connections", []):
             metadata = connection.get("metadata", {}) or {}
-            host = str(metadata.get("host") or "").lower().rstrip(".")
-            if not host_matches_targets(host, suffixes, exact_domains):
-                continue
-            chains = [str(item) for item in connection.get("chains", [])]
-            if old_node not in chains:
-                continue
-            connection_id = connection.get("id")
-            if not connection_id:
-                continue
-            try:
-                self.request(
-                    "DELETE",
-                    f"/connections/{quote(str(connection_id), safe='')}",
-                )
-                closed += 1
-            except ControllerError:
-                continue
-        return closed
+            host = str(metadata.get("host") or metadata.get("sniffHost") or "").lower().rstrip(".")
+            if host_matches_targets(host, suffixes, exact_domains):
+                relevant.append(connection)
+
+        new_connections = [
+            connection
+            for connection in relevant
+            if new_node in [str(item) for item in connection.get("chains", [])]
+        ]
+        old_connections = [
+            connection
+            for connection in relevant
+            if new_node not in [str(item) for item in connection.get("chains", [])]
+        ]
+        closed = 0
+        if mode == "replacement_only":
+            replacements: dict[tuple[str, str, str, str], list[str]] = {}
+            for connection in new_connections:
+                identity = provider_connection_identity(connection)
+                started_at = str(connection.get("start") or "")
+                if identity is not None and started_at:
+                    replacements.setdefault(identity, []).append(started_at)
+            for connection in old_connections:
+                identity = provider_connection_identity(connection)
+                started_at = str(connection.get("start") or "")
+                replacement_starts = replacements.get(identity, []) if identity else []
+                if not started_at or not any(item > started_at for item in replacement_starts):
+                    continue
+                connection_id = connection.get("id")
+                if not connection_id:
+                    continue
+                try:
+                    self.request(
+                        "DELETE",
+                        f"/connections/{quote(str(connection_id), safe='')}",
+                    )
+                    closed += 1
+                except ControllerError:
+                    continue
+        return {
+            "mode": mode,
+            "provider_connections": len(relevant),
+            "new_connections": len(new_connections),
+            "old_connections": len(old_connections),
+            "closed": closed,
+            "preserved": len(old_connections) - closed,
+        }
 
     def close_stale_ai_connections(
         self,
@@ -196,32 +238,27 @@ class ClashController:
         suffixes: Sequence[str],
         exact_domains: Sequence[str] = (),
     ) -> int:
-        """关闭所有仍绑定非新节点的 AI 连接，保留普通网站和新链路。"""
-        try:
-            result = self.request("GET", "/connections")
-        except ControllerError:
-            return 0
-        closed = 0
-        for connection in result.get("connections", []):
-            metadata = connection.get("metadata", {}) or {}
-            host = str(metadata.get("host") or "").lower().rstrip(".")
-            if not host_matches_targets(host, suffixes, exact_domains):
-                continue
-            chains = [str(item) for item in connection.get("chains", [])]
-            if new_node in chains:
-                continue
-            connection_id = connection.get("id")
-            if not connection_id:
-                continue
-            try:
-                self.request(
-                    "DELETE",
-                    f"/connections/{quote(str(connection_id), safe='')}",
-                )
-                closed += 1
-            except ControllerError:
-                continue
-        return closed
+        """兼容旧调用，但只关闭已有明确替代连接的旧连接。"""
+        return int(
+            self.drain_ai_connections(
+                new_node,
+                suffixes,
+                exact_domains,
+                mode="replacement_only",
+            )["closed"]
+        )
+
+
+def provider_connection_identity(connection: dict[str, Any]) -> tuple[str, str, str, str] | None:
+    """生成保守的连接替代标识；缺少进程信息时绝不允许自动关闭。"""
+    metadata = connection.get("metadata", {}) or {}
+    process = str(metadata.get("processPath") or metadata.get("process") or "").strip()
+    host = str(metadata.get("host") or metadata.get("sniffHost") or "").lower().rstrip(".")
+    network = str(metadata.get("network") or "").lower()
+    destination_port = str(metadata.get("destinationPort") or "")
+    if not process or not host:
+        return None
+    return process, host, network, destination_port
 
 
 def now_ts() -> int:
@@ -782,6 +819,7 @@ def default_state() -> dict[str, Any]:
             "last_status": "unknown",
             "consecutive_hard_failures": 0,
             "hard_failure_streaks": {},
+            "hard_failure_round_targets": [],
             "last_hard_failure_at": 0,
             "first_failure_at": 0,
             "failure_reasons": [],
@@ -2030,10 +2068,91 @@ def record_episode_attempt(state: dict[str, Any], node: str) -> None:
 def clear_failure_confirmation(monitor: dict[str, Any]) -> None:
     monitor["consecutive_hard_failures"] = 0
     monitor["hard_failure_streaks"] = {}
+    monitor["hard_failure_round_targets"] = []
     monitor["last_hard_failure_at"] = 0
     monitor["first_failure_at"] = 0
     monitor["failure_reasons"] = []
     monitor["prepared_candidates"] = []
+
+
+def hard_failure_targets(result: dict[str, Any]) -> set[str]:
+    return {
+        str(item).split(":", 1)[0] for item in result.get("hard_reasons", []) if str(item).strip()
+    }
+
+
+def record_hard_failure_round(
+    monitor: dict[str, Any],
+    result: dict[str, Any],
+    timestamp: int,
+    minimum_gap: int,
+    *,
+    force_count: bool = False,
+) -> tuple[int, bool]:
+    """记录一个相互隔离的硬故障轮次，返回累计轮次和本次是否计数。"""
+    targets = hard_failure_targets(result)
+    previous_failure_at = int(monitor.get("last_hard_failure_at", 0))
+    previous_failures = int(monitor.get("consecutive_hard_failures", 0))
+    counted = bool(
+        force_count or not previous_failure_at or timestamp - previous_failure_at >= minimum_gap
+    )
+    if counted:
+        failures = previous_failures + 1 if previous_failures else 1
+        monitor["last_hard_failure_at"] = timestamp
+        previous_streaks = monitor.get("hard_failure_streaks", {})
+        if not isinstance(previous_streaks, dict):
+            previous_streaks = {}
+        monitor["hard_failure_streaks"] = {
+            target: int(previous_streaks.get(target, 0)) + 1 for target in targets
+        }
+        history = [
+            [str(target) for target in round_targets]
+            for round_targets in monitor.get("hard_failure_round_targets", [])
+            if isinstance(round_targets, list)
+        ]
+        history.append(sorted(targets))
+        monitor["hard_failure_round_targets"] = history[-8:]
+    else:
+        failures = max(1, previous_failures)
+    monitor["consecutive_hard_failures"] = failures
+    monitor["failure_reasons"] = list(result.get("hard_reasons", []))
+    monitor["last_status"] = "hard_failure"
+    return failures, counted
+
+
+def failure_gate(
+    monitor: dict[str, Any],
+    config: dict[str, Any],
+    timestamp: int,
+) -> dict[str, Any]:
+    """多目标故障走快速门；单目标抖动必须经过更长观察。"""
+    history = [
+        [str(target) for target in round_targets]
+        for round_targets in monitor.get("hard_failure_round_targets", [])
+        if isinstance(round_targets, list)
+    ]
+    distinct_targets = sorted({target for round_targets in history for target in round_targets})
+    fast_rounds = int(config["failure_rounds_before_switch"])
+    fast = len(distinct_targets) >= int(config["fast_failover_min_distinct_targets"])
+    required_rounds = (
+        fast_rounds
+        if fast
+        else max(
+            fast_rounds + 1,
+            int(config["single_target_failure_rounds_before_switch"]),
+        )
+    )
+    required_observation = 0 if fast else int(config["single_target_observation_seconds"])
+    elapsed = max(0, timestamp - int(monitor.get("first_failure_at", timestamp)))
+    failures = int(monitor.get("consecutive_hard_failures", 0))
+    return {
+        "mode": "multi_signal" if fast else "single_target",
+        "distinct_targets": distinct_targets,
+        "required_rounds": required_rounds,
+        "required_observation_seconds": required_observation,
+        "elapsed_seconds": elapsed,
+        "ready": failures >= required_rounds and elapsed >= required_observation,
+    }
 
 
 def failover(
@@ -2153,11 +2272,13 @@ def failover(
             episode["phase"] = "probation"
             episode["new_node"] = candidate
             clear_all_unavailable(state)
-            closed = (
-                controller.close_stale_ai_connections(candidate, suffixes, exact_domains)
-                if exact_domains
-                else controller.close_stale_ai_connections(candidate, suffixes)
+            drain = controller.drain_ai_connections(
+                candidate,
+                suffixes,
+                exact_domains,
+                mode=str(config["connection_drain_mode"]),
             )
+            closed = int(drain["closed"])
             rebuild_pools(state, catalog, config, verified_at, candidate)
             log_event(
                 log_path,
@@ -2168,6 +2289,8 @@ def failover(
                 reason=reason,
                 layer=layer_name,
                 closed_connections=closed,
+                preserved_connections=int(drain["preserved"]),
+                connection_drain_mode=drain["mode"],
                 verification=verification["classification"],
                 probation_until=monitor["probation_until"],
             )
@@ -2181,6 +2304,8 @@ def failover(
                 "new_node": candidate,
                 "layer": layer_name,
                 "closed_connections": closed,
+                "preserved_connections": int(drain["preserved"]),
+                "connection_drain_mode": drain["mode"],
                 "verification": public_route_result(verification),
             }
 
@@ -2379,32 +2504,22 @@ def health_iteration(
         atomic_write_json(state_path, state)
         return {"status": "local_network_down", "direct": direct}
 
-    hard_targets = {item.split(":", 1)[0] for item in result.get("hard_reasons", [])}
-    previous_streaks = monitor.get("hard_failure_streaks", {})
-    if not isinstance(previous_streaks, dict):
-        previous_streaks = {}
-    monitor["hard_failure_streaks"] = {
-        target: int(previous_streaks.get(target, 0)) + 1 for target in hard_targets
-    }
-    previous_failure_at = int(monitor.get("last_hard_failure_at", 0))
-    previous_failures = int(monitor.get("consecutive_hard_failures", 0))
     minimum_gap = int(config["failure_confirmation_min_gap_seconds"])
-    if previous_failure_at and timestamp - previous_failure_at < minimum_gap:
-        failures = max(1, previous_failures)
-    else:
-        failures = previous_failures + 1 if previous_failures else 1
-        monitor["last_hard_failure_at"] = timestamp
-    monitor["consecutive_hard_failures"] = failures
-    if failures == 1:
+    failures, counted = record_hard_failure_round(
+        monitor,
+        result,
+        timestamp,
+        minimum_gap,
+    )
+    if failures == 1 and counted:
         monitor["first_failure_at"] = timestamp
         ensure_failover_episode(state, current, timestamp)
-    monitor["failure_reasons"] = list(result.get("hard_reasons", []))
-    monitor["last_status"] = "hard_failure"
     log_event(
         log_path,
         "hard_failure",
         current=current,
         consecutive_failures=failures,
+        counted=counted,
         reasons=result.get("hard_reasons", []),
     )
 
@@ -2416,52 +2531,21 @@ def health_iteration(
             "backoff_until": monitor["backoff_until"],
         }
 
-    required = int(config["failure_rounds_before_switch"])
-    if failures < required:
-        if not bool(config.get("parallel_failure_confirmation")) or required != 2:
-            prepare_failover_candidates(
-                controller,
-                state,
-                catalog,
-                config,
-                log_path,
-                current,
-            )
-            atomic_write_json(state_path, state)
-            return {
-                "status": "waiting_confirmation",
-                "current": current,
-                "consecutive_hard_failures": failures,
-                "required": required,
-                "route": public_route_result(result),
-            }
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            preparation = executor.submit(
-                prepare_failover_candidates,
-                controller,
-                state,
-                catalog,
-                config,
-                log_path,
-                current,
-            )
-            time.sleep(float(minimum_gap))
-            confirmation = route_probe(config["mixed_proxy_url"], config)
-            confirmation_direct = (
-                direct_network_probe(config)
-                if confirmation["classification"] == "hard_failure"
-                else None
-            )
-            try:
-                preparation.result()
-            except (ControllerError, ScannerError, OSError, yaml.YAMLError) as exc:
-                log_event(
-                    log_path,
-                    "candidate_preparation_failed",
-                    error=type(exc).__name__,
-                )
-
+    fast_rounds = int(config["failure_rounds_before_switch"])
+    if (
+        failures == 1
+        and counted
+        and bool(config.get("parallel_failure_confirmation"))
+        and fast_rounds == 2
+    ):
+        # 第一轮只做当前链路复核，不再同时启动候选节点深扫。
+        time.sleep(float(minimum_gap))
+        confirmation = route_probe(config["mixed_proxy_url"], config)
+        confirmation_direct = (
+            direct_network_probe(config)
+            if confirmation["classification"] == "hard_failure"
+            else None
+        )
         confirmation_timestamp = now_ts()
         selected_after_confirmation, _ = current_group(controller, config["group_name"])
         if selected_after_confirmation != current:
@@ -2527,25 +2611,49 @@ def health_iteration(
 
         result = confirmation
         timestamp = confirmation_timestamp
-        failures = 2
-        monitor["consecutive_hard_failures"] = failures
-        monitor["last_hard_failure_at"] = timestamp
-        monitor["hard_failure_streaks"] = {
-            target: int(monitor["hard_failure_streaks"].get(target, 0)) + 1
-            for target in {item.split(":", 1)[0] for item in result.get("hard_reasons", [])}
-        }
-        monitor["failure_reasons"] = list(result.get("hard_reasons", []))
-        monitor["last_status"] = "hard_failure"
+        failures, counted = record_hard_failure_round(
+            monitor,
+            result,
+            timestamp,
+            minimum_gap,
+            force_count=True,
+        )
         log_event(
             log_path,
             "hard_failure",
             current=current,
             consecutive_failures=failures,
+            counted=counted,
             reasons=result.get("hard_reasons", []),
         )
 
+    gate = failure_gate(monitor, config, timestamp)
+    if not gate["ready"]:
+        log_event(
+            log_path,
+            "failure_confirmation_waiting",
+            current=current,
+            gate_mode=gate["mode"],
+            distinct_targets=gate["distinct_targets"],
+            consecutive_failures=failures,
+            required_rounds=gate["required_rounds"],
+            elapsed_seconds=gate["elapsed_seconds"],
+            required_observation_seconds=gate["required_observation_seconds"],
+        )
+        atomic_write_json(state_path, state)
+        return {
+            "status": "waiting_confirmation",
+            "current": current,
+            "gate": gate,
+            "route": public_route_result(result),
+        }
+
     reason_values = [item.split(":", 1)[-1] for item in monitor.get("failure_reasons", [])]
-    reason_text = "连续两次硬故障"
+    reason_text = (
+        "连续两轮多信号硬故障"
+        if gate["mode"] == "multi_signal"
+        else f"单目标持续{failures}轮硬故障"
+    )
     if reason_values:
         reason_text += f"（{' + '.join(reason_values[:3])}）"
     outcome = failover(

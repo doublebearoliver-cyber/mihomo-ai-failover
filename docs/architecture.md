@@ -84,12 +84,14 @@ infrastructure cannot become a generated critical probe.
 6. Within a round, only probes classified hard are retried once after one
    second. A recovered retry makes that target non-hard; healthy and soft
    probes are not repeated.
-7. Two aggregate hard-failure rounds, separated by at least eight seconds, are
-   required. The failing critical target may differ between rounds because the
-   decision represents route failure, not a target-specific counter.
-8. The first hard-failure round immediately starts isolated candidate
-   preparation. A successful, soft-only, direct-network-down, or
-   controller-down round resets confirmation and cannot trigger switching.
+7. Two aggregate hard-failure rounds, separated by at least eight seconds, open
+   the fast failover gate only when at least two distinct critical targets have
+   failed across those rounds. Repeated failure of only one target requires at
+   least three rounds and 30 seconds from the first verified failure.
+8. The first hard-failure round confirms only the selected route. Candidate
+   preparation starts after the adaptive failure gate opens, so a recovered,
+   soft-only, direct-network-down, or controller-down round cannot launch a
+   broad candidate scan or trigger switching.
 
 Cloudflare challenges and generic access responses remain soft because command-line probes cannot prove the
 interactive browser outcome. An explicitly user-verified login result can be
@@ -98,27 +100,28 @@ ASN, and country, expires after a configured TTL, and affects candidate
 eligibility/ranking only; it never increments a hard-failure streak or triggers
 a switch.
 
-Candidate preparation runs in parallel with the eight-second failure
-confirmation gap. For already prepared independent candidates whose live
-acceptance is retry-free, the modeled upper bound is 19 seconds from the first
-verified failure for candidate one and 30 seconds for candidate two, including
-the just-in-time preflight, connection wait, and live verification. A mandatory
-reverification for an unstable-looking candidate, or a cold rescue scan, is
-deliberately not promised this latency bound.
+For fresh independent candidates whose live acceptance is retry-free, the
+multi-signal modeled upper bound remains 19 seconds for candidate one and 30
+seconds for candidate two, including the eight-second confirmation gap,
+just-in-time preflight, connection wait, and live verification. Candidate deep
+validation, mandatory reverification for an unstable-looking candidate, and a
+cold rescue scan are deliberately outside that strict latency bound. A
+single-target episode intentionally observes for at least 30 seconds before it
+may switch.
 
 ## Candidate pools
 
 Every enabled Provider maintains the following pools independently:
 
 - Active: target 12-16 recently verified independent exits; a rotating batch of
-  four gets light preflight every 10 seconds and two get a full-path scan every
-  2 minutes.
+  two gets light preflight every 10 seconds and two get a full-path scan every
+  5 minutes.
 - Warm: target 30-40 previously verified independent exits; rotating
-  full-path batches of two every 5 minutes.
-- Cold: remaining real proxy nodes; rotating full-path batches of four every
+  full-path batches of one every 10 minutes.
+- Cold: remaining real proxy nodes; rotating full-path batches of two every
   6 hours.
-- Refill: when active or warm is below target, two cold candidates are scanned
-  every 60 seconds instead of waiting for the normal cold cycle.
+- Refill: when active or warm is below target, one cold candidate is scanned
+  every 10 minutes instead of waiting for the normal cold cycle.
 
 That Provider's maintenance scans pause during its hard-failure confirmation, switching, and
 the 60-second probation period. This prevents inventory work from competing
@@ -132,8 +135,8 @@ the live AI group does not move during inventory work.
 Candidates are ranked by full-path eligibility, recent success rate, distinct
 exit IP, ASN diversity, cooldown/recovery state, stability, and only then
 median latency. Duplicate exit IPs are removed from each attempt order. A
-candidate requires two eligible full-path samples in a 120-second window,
-separated by at least five seconds, with the newest sample no older than 30
+candidate requires two eligible full-path samples in a 3600-second window,
+separated by at least five seconds, with the newest sample no older than 60
 seconds. A light Mihomo delay probe alone never clears recovery or proves
 candidate eligibility.
 An unexpired rejected browser fingerprint is excluded from all three failover
@@ -153,16 +156,18 @@ round recovers a hard target on retry, the daemon waits three seconds and runs a
 mandatory second round. That second round must pass retry-free; otherwise the
 candidate is quarantined and the old selection is immediately restored without
 closing connections. A clean first round or clean mandatory follow-up commits
-the switch, starts a 60-second probation period, and closes only connections
-whose hostname matches that Provider's approved suffixes/exact domains and
-whose chains do not contain the new node. This preserves ordinary traffic,
-other Providers, and already-correct connections.
+the switch and starts a 60-second probation period. Connection draining then
+defaults to `preserve`: old Provider connections remain open while all new
+connections use the new selection. Optional `replacement_only` cleanup requires
+a newer connection with the same process, hostname, network, and destination
+port on the new route before an old one may close. Missing process or start-time
+evidence always preserves the old connection. This protects active Responses
+WebSockets as well as ordinary traffic and other Providers.
 
 The failure episode records attempted nodes and exit fingerprints, so it does
-not bounce between duplicate exits. Three independent candidates are prepared
-in parallel and at most two are live-selected per failover transaction. A
-commit transaction reuses up to two already prepared candidates instead of
-blocking to refill the preparation target after the second failure round. A
+not bounce between duplicate exits. Two independent candidates are prepared
+and at most two are live-selected per failover transaction. A
+commit transaction reuses up to two already prepared candidates. A
 failed just-in-time preflight never moves the live group and does not consume
 the live-selection budget. Remaining untried exits cause a short
 candidate-retry backoff, not a false all-unavailable declaration. Only

@@ -61,8 +61,11 @@ async def test_mcp_simulation_is_isolated_and_passes() -> None:
     assert result.structured_content["failure_rounds_before_switch"] == 2
     assert result.structured_content["upper_bound_seconds"] <= 30
     assert result.structured_content["upper_bound_scope"] == "prepared_retry_free_candidate"
-    assert result.structured_content["prepared_candidate_target"] == 3
+    assert result.structured_content["prepared_candidate_target"] == 2
     assert result.structured_content["live_selection_budget"] == 2
+    assert result.structured_content["single_target_failure_rounds_before_switch"] == 3
+    assert result.structured_content["prevalidation_overlaps_confirmation"] is False
+    assert result.structured_content["connection_drain_mode"] == "preserve"
     assert result.structured_content["different_exit_preferred"] is True
     assert result.structured_content["live_proxy_changed"] is False
 

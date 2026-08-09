@@ -3,10 +3,10 @@
 Automatic, stability-first AI proxy failover for macOS with Clash Verge Rev
 and Mihomo. It diagnoses ChatGPT login/loading failures, Codex network errors,
 and stalled AI streams, keeps a working selected node, and switches only the
-affected Provider's dedicated proxy group after two consecutive, verified
-hard-failure rounds on that Provider's real path.
+affected Provider's dedicated proxy group after guarded, verified hard-failure
+evidence on that Provider's real path.
 
-> Version `0.2.1` is an early public preview for macOS, Clash Verge Rev, and
+> Version `0.2.2` is an early public preview for macOS, Clash Verge Rev, and
 > Mihomo. OpenAI is enabled by default. WorkBuddy (China), Kimi, MiniMax, and
 > Mavis remain disabled until their real local traffic is observed and
 > reviewed. The project never enables TUN automatically.
@@ -45,15 +45,15 @@ usable. This project validates each enabled Provider path and:
 - ignores small latency changes and isolated soft anomalies;
 - retries only the hard-failing probe once before a round can count as a
   verified hard failure;
+- switches after two guarded rounds only when at least two independent critical
+  targets failed across those rounds; one repeatedly failing target requires at
+  least three rounds and a 30-second observation window;
 - excludes local-network and controller failures from blind switching;
 - maintains active, warm, and cold pools deduplicated by observed exit IP;
-- starts isolated candidate validation after the first hard-failure round and
-  runs it in parallel with the second confirmation round, while requiring two
-  fresh usable full-path samples, at least one retry-free, before a candidate
-  can be selected; three independent candidates are prepared while at most two
-  are live-selected; commit reuses already prepared candidates instead of
-  blocking to refill all three, and a failed just-in-time preflight does not
-  consume that live-selection budget;
+- confirms the selected route before starting isolated candidate validation,
+  so an isolated first failure cannot launch a broad node scan; two independent
+  candidates are prepared while at most two are live-selected, and each still
+  needs two usable full-path samples with at least one retry-free result;
 - ranks health, success history, exit/ASN diversity, cooldown, and stability
   before latency;
 - verifies the selected candidate on the live route before committing; a
@@ -61,8 +61,10 @@ usable. This project validates each enabled Provider path and:
   seconds, otherwise it rolls back, followed by a 60-second probation period;
 - reruns a just-in-time live-core preflight immediately before each candidate
   selection, so stale preparation evidence cannot cause a blind switch;
-- closes only the affected Provider's stale connections across old chains,
-  and only after the new route verifies;
+- uses make-before-break connection draining: the default `preserve` mode does
+  not delete old Provider connections after a switch, so an active Codex or
+  ChatGPT WebSocket can finish naturally; optional `replacement_only` cleanup
+  requires a newer same-process replacement on the new route;
 - notifies once per all-unavailable outage episode and backs off;
 - exposes the same behavior through a CLI, local stdio MCP, Codex plugin, and
   Claude Code plugin.
@@ -128,7 +130,7 @@ Install [`uv`](https://docs.astral.sh/uv/), then:
 
 ```bash
 uv tool install \
-  'mihomo-ai-failover[mcp] @ git+https://github.com/doublebearoliver-cyber/mihomo-ai-failover@v0.2.1'
+  'mihomo-ai-failover[mcp] @ git+https://github.com/doublebearoliver-cyber/mihomo-ai-failover@v0.2.2'
 ```
 
 Diagnose and preview before writing:

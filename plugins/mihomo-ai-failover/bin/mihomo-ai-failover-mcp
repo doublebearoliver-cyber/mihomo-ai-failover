@@ -41,6 +41,6 @@ if [ -z "${uv_binary}" ]; then
 fi
 
 exec "${uv_binary}" tool run \
-  --from "git+https://github.com/doublebearoliver-cyber/mihomo-ai-failover@v0.2.1" \
+  --from "git+https://github.com/doublebearoliver-cyber/mihomo-ai-failover@v0.2.2" \
   --with "mcp>=2,<3" \
   mihomo-ai-failover-mcp

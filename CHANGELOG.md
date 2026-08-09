@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented here.
 
+## [0.2.2] - 2026-08-09
+
+### Fixed
+
+- Replaced unconditional post-switch deletion of old Provider connections with
+  make-before-break draining. The safe default preserves active Codex and
+  ChatGPT WebSockets; optional cleanup requires a newer same-process
+  replacement on the new route.
+- Prevented two timeouts from one isolated probe, such as the OpenAI models
+  endpoint, from interrupting an otherwise usable long-lived connection.
+
+### Changed
+
+- Added an adaptive failure gate: two distinct critical targets retain the fast
+  two-round path, while one repeated target requires three rounds and at least
+  30 seconds of observation.
+- Stopped candidate deep scans from starting on the first isolated hard-failure
+  round. Candidate preparation now begins only after the failure gate opens.
+- Reduced default preflight concurrency, preparation width, and rotating deep
+  scan batches; lengthened the reusable candidate-evidence window so bounded
+  background work can still seed fast validation.
+- Added regression coverage and Agent guidance for connection preservation,
+  single-target flapping, multi-signal failover, and scan suppression.
+
 ## [0.2.1] - 2026-08-08
 
 ### Changed

@@ -125,13 +125,14 @@ Do not call an installation or service mutation during diagnosis.
 ## Classify evidence correctly
 
 Hard-failure evidence includes a health-check-classified TCP/TLS failure,
-timeout, reset, or verified unavailable/region response. The daemon requires
-two consecutive verified hard-failure rounds on the selected Provider route and applies
-local-network and controller guards before evaluating a switch. The failing
-critical target may differ between rounds. The first hard-failure round may
-start isolated candidate preparation, but it never switches the live group by
-itself. Within each round, a hard-failing target is retried once; a successful
-retry means that round does not count as hard for that target.
+timeout, reset, or verified unavailable/region response. The daemon applies
+local-network and controller guards before evaluating a switch. Two guarded
+rounds open the fast gate only when at least two distinct critical targets fail
+across them. A single repeatedly failing target requires at least three rounds
+and 30 seconds of observation. The first hard-failure round confirms only the
+selected route; it does not start candidate deep scans or switch the live group.
+Within each round, a hard-failing target is retried once; a successful retry
+means that round does not count as hard for that target.
 
 Treat these as soft or auxiliary evidence:
 
@@ -155,16 +156,20 @@ Do not claim that a node should switch from one `run_health_check` snapshot.
 
 - Use `list_pools` for active, warm, and cold pool counts and independent-exit
   coverage.
-- Use `simulate_failover` to verify the two-hard-failure timing and
-  different-exit preference without touching the live proxy.
+- Use `simulate_failover` to verify the adaptive failure gates, prepared-route
+  timing, connection-preservation mode, and different-exit preference without
+  touching the live proxy.
 - Use `get_recent_events` to distinguish a hard failure, a soft anomaly, a
   successful switch, cooldown, and an all-unavailable backoff episode.
 - Treat a light delay result as preflight only. A switch candidate needs two
-  fresh full Provider-path samples, a just-in-time live-core preflight, live-route
-  verification before connection closure, and a post-switch probation period.
+  fresh full Provider-path samples, a just-in-time live-core preflight,
+  live-route verification before commit, and a post-switch probation period.
   The deep evidence needs two usable samples with at least one retry-free result.
   A retry-assisted live acceptance must pass a mandatory retry-free follow-up
   after three seconds before a newly selected route can commit.
+- Default connection draining is `preserve`: never interpret an old-chain
+  Codex/ChatGPT WebSocket as stale merely because the group changed. Optional
+  cleanup requires a newer same-process replacement on the new route.
 
 ## Adapt a Provider to this Mac
 

@@ -36,8 +36,9 @@
 - A healthy selected node stays selected. Latency differences alone never
   trigger a switch.
 - Switching requires two guarded aggregate hard-failure rounds on the verified
-  route for that Provider; the failing critical target may differ between
-  rounds.
+  route only when at least two distinct critical targets fail across those
+  rounds. A single failing target requires at least three rounds and a
+  30-second observation window.
 - Each enabled Provider has an independent select group, state file, health
   history, pools, cooldowns, switch episode, and log. One Provider's failure
   must never increment another Provider's counters or move another group.
@@ -50,9 +51,9 @@
 - Deep candidate evidence needs two usable samples with at least one retry-free
   result. A retry-assisted live acceptance must pass a mandatory retry-free
   follow-up before a newly selected route can commit.
-- After switching, close only stale connections matching that Provider's
-  approved suffixes/exact domains whose chains do not contain the newly
-  selected node.
+- After switching, preserve old Provider connections by default. Optional
+  cleanup may close an old connection only after a newer same-process,
+  same-host replacement exists on the newly selected node.
 - Notify "当前机场全部不可用" once per outage episode and use backoff.
 
 ## Code layout
