@@ -19,7 +19,7 @@ from mihomo_ai_failover.service import SERVICE_UNINSTALL_CONFIRMATION
 
 ROOT = Path(__file__).parents[1]
 PLUGIN = ROOT / "plugins" / "mihomo-ai-failover"
-SKILL = PLUGIN / "skills" / "mihomo-ai-failover" / "SKILL.md"
+SKILL = PLUGIN / "skills" / "dbear-mihomo-ai-failover" / "SKILL.md"
 
 READ_ONLY_TOOLS = {
     "diagnose_environment",
@@ -77,7 +77,7 @@ def test_skill_frontmatter_and_marketplaces_reference_real_plugin() -> None:
     _, frontmatter, _ = text.split("---", 2)
     metadata = yaml.safe_load(frontmatter)
     assert set(metadata) == {"name", "description"}
-    assert metadata["name"] == "mihomo-ai-failover"
+    assert metadata["name"] == "dbear-mihomo-ai-failover"
     for search_term in ("ChatGPT", "Codex", "Clash Verge Rev", "Mihomo", "login"):
         assert search_term in metadata["description"]
 
@@ -94,14 +94,14 @@ def test_agent_contract_is_discoverable_and_covers_every_mcp_tool() -> None:
     integration = (ROOT / "docs" / "agent-integration.md").read_text(encoding="utf-8")
     plugin_readme = (PLUGIN / "README.md").read_text(encoding="utf-8")
 
-    canonical_path = "plugins/mihomo-ai-failover/skills/mihomo-ai-failover/SKILL.md"
+    canonical_path = "plugins/mihomo-ai-failover/skills/dbear-mihomo-ai-failover/SKILL.md"
     for readme in ("README.md", "README.zh-CN.md"):
         text = (ROOT / readme).read_text(encoding="utf-8")
         assert canonical_path in text
         assert "docs/agent-integration.md" in text
-        assert "--skill mihomo-ai-failover --agent codex --global --yes" in text
+        assert "--skill dbear-mihomo-ai-failover --agent codex --global --yes" in text
 
-    assert "skills/mihomo-ai-failover/SKILL.md" in plugin_readme
+    assert "skills/dbear-mihomo-ai-failover/SKILL.md" in plugin_readme
     for heading in (
         "## When to use this skill",
         "## Authority and trust",

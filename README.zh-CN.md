@@ -9,12 +9,12 @@
 > 默认继续使用 macOS 系统代理，不启用 TUN。
 
 [English](README.md) ·
-[AI 使用契约](plugins/mihomo-ai-failover/skills/mihomo-ai-failover/SKILL.md) ·
+[AI 使用契约](plugins/mihomo-ai-failover/skills/dbear-mihomo-ai-failover/SKILL.md) ·
 [Agent 接入](docs/agent-integration.md) · [架构](docs/architecture.md) ·
 [验收清单](docs/validation.md)
 
 > **AI Agent 在调用任何 MCP 工具前，必须先完整读取
-> [`mihomo-ai-failover` Skill](plugins/mihomo-ai-failover/skills/mihomo-ai-failover/SKILL.md)。**
+> [`dbear-mihomo-ai-failover` Skill](plugins/mihomo-ai-failover/skills/dbear-mihomo-ai-failover/SKILL.md)。**
 > 这是面向模型的权威使用契约，定义了适用环境、安全边界、工具顺序、停止条件
 > 和结果输出要求；不能只根据本 README 自行操作。
 
@@ -133,15 +133,15 @@ GitHub、Git、npm、Docker、Cloudflare/Google 等共享基础设施和普通�
 
 ```bash
 npx --yes skills@latest add doublebearoliver-cyber/mihomo-ai-failover \
-  --skill mihomo-ai-failover --agent codex --global --yes
+  --skill dbear-mihomo-ai-failover --agent codex --global --yes
 ```
 
 如果某个客户端无法从仓库缩写发现嵌套 Skill，可直接使用规范目录地址：
 
 ```bash
 npx --yes skills@latest add \
-  https://github.com/doublebearoliver-cyber/mihomo-ai-failover/tree/main/plugins/mihomo-ai-failover/skills/mihomo-ai-failover \
-  --skill mihomo-ai-failover --agent codex --global --yes
+  https://github.com/doublebearoliver-cyber/mihomo-ai-failover/tree/main/plugins/mihomo-ai-failover/skills/dbear-mihomo-ai-failover \
+  --skill dbear-mihomo-ai-failover --agent codex --global --yes
 ```
 
 Skill 只提供 Agent 指令和安全边界，不会自动安装本机 CLI/MCP 运行时。需要
@@ -274,7 +274,7 @@ mihomo-ai-failover provider-overlay-apply \
 `profile-install --confirm APPLY_PROFILE_INTEGRATION`，按结果重启 Clash Verge，
 然后执行 `check --provider kimi`、`inventory --provider kimi` 和
 `service-start`。完整 Agent 工作流见
-[Skill 的 Provider 适配参考](plugins/mihomo-ai-failover/skills/mihomo-ai-failover/references/provider-adaptation.md)。
+[Skill 的 Provider 适配参考](plugins/mihomo-ai-failover/skills/dbear-mihomo-ai-failover/references/provider-adaptation.md)。
 
 真实浏览器反馈是显式写操作。先停止监控，确认浏览器结果，再记录并重启：
 

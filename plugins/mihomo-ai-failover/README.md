@@ -9,7 +9,7 @@ MiniMax, and Mavis, plus private local adaptation from observed Mihomo traffic.
 ## Agent entrypoint
 
 Before calling any MCP tool, read
-[`skills/mihomo-ai-failover/SKILL.md`](skills/mihomo-ai-failover/SKILL.md)
+[`skills/dbear-mihomo-ai-failover/SKILL.md`](skills/dbear-mihomo-ai-failover/SKILL.md)
 in full. It is the canonical agent contract for:
 
 - when this plugin should and should not be used;

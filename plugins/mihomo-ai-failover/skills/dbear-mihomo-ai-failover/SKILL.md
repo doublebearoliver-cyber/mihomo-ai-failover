@@ -1,5 +1,5 @@
 ---
-name: mihomo-ai-failover
+name: dbear-mihomo-ai-failover
 description: Diagnose and safely operate automatic proxy failover for ChatGPT, Codex, WorkBuddy (China), Kimi, MiniMax, and Mavis on macOS with Clash Verge Rev and Mihomo. Use when AI login fails, ChatGPT will not load, Codex spins or reports network errors, streaming stalls, or the user needs verified hard-failure detection, stable node switching, Provider-specific routing, local domain discovery, installation, rollback, or recovery.
 ---
 
