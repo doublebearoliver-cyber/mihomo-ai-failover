@@ -12,13 +12,13 @@ evidence on that Provider's real path.
 > reviewed. The project never enables TUN automatically.
 
 [中文说明](README.zh-CN.md) ·
-[AI agent contract](plugins/mihomo-ai-failover/skills/mihomo-ai-failover/SKILL.md) ·
+[AI agent contract](plugins/mihomo-ai-failover/skills/dbear-mihomo-ai-failover/SKILL.md) ·
 [Agent integration](docs/agent-integration.md) ·
 [Architecture](docs/architecture.md) ·
 [Validation](docs/validation.md)
 
 > **AI agents: read the
-> [`mihomo-ai-failover` skill](plugins/mihomo-ai-failover/skills/mihomo-ai-failover/SKILL.md)
+> [`dbear-mihomo-ai-failover` skill](plugins/mihomo-ai-failover/skills/dbear-mihomo-ai-failover/SKILL.md)
 > before using any MCP tool.** It is the canonical machine-facing contract for
 > supported environments, safety boundaries, tool order, stop conditions, and
 > result reporting. This README is not a substitute for that contract.
@@ -111,7 +111,7 @@ Install the Agent Skill with the official `skills` CLI:
 
 ```bash
 npx --yes skills@latest add doublebearoliver-cyber/mihomo-ai-failover \
-  --skill mihomo-ai-failover --agent codex --global --yes
+  --skill dbear-mihomo-ai-failover --agent codex --global --yes
 ```
 
 If a client cannot discover a nested Skill from the repository shorthand, use
@@ -119,8 +119,8 @@ the canonical Skill directory directly:
 
 ```bash
 npx --yes skills@latest add \
-  https://github.com/doublebearoliver-cyber/mihomo-ai-failover/tree/main/plugins/mihomo-ai-failover/skills/mihomo-ai-failover \
-  --skill mihomo-ai-failover --agent codex --global --yes
+  https://github.com/doublebearoliver-cyber/mihomo-ai-failover/tree/main/plugins/mihomo-ai-failover/skills/dbear-mihomo-ai-failover \
+  --skill dbear-mihomo-ai-failover --agent codex --global --yes
 ```
 
 The Skill supplies instructions and safety boundaries; it does not install the
@@ -229,7 +229,7 @@ not force that Provider into a failover group.
 After explicit authorization, write with
 `--confirm APPLY_PROVIDER_OVERLAY`, then separately preview/apply the
 persistent profile integration and restart Clash Verge when requested. See the
-[Provider adaptation contract](plugins/mihomo-ai-failover/skills/mihomo-ai-failover/references/provider-adaptation.md).
+[Provider adaptation contract](plugins/mihomo-ai-failover/skills/dbear-mihomo-ai-failover/references/provider-adaptation.md).
 
 Disabling a Provider stops its state machine after the service restarts. To
 avoid deleting user-managed rules, previously installed persistent rules are

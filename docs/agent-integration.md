@@ -3,7 +3,7 @@
 ## Canonical agent contract
 
 Every model must read
-[`plugins/mihomo-ai-failover/skills/mihomo-ai-failover/SKILL.md`](../plugins/mihomo-ai-failover/skills/mihomo-ai-failover/SKILL.md)
+[`plugins/mihomo-ai-failover/skills/dbear-mihomo-ai-failover/SKILL.md`](../plugins/mihomo-ai-failover/skills/dbear-mihomo-ai-failover/SKILL.md)
 in full before using the MCP server. That `SKILL.md` is the canonical
 machine-facing workflow and safety contract.
 

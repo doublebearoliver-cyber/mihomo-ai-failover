@@ -1,0 +1,4 @@
+interface:
+  display_name: "dbear · Mihomo AI Failover"
+  short_description: "诊断并安全操作 Mihomo 的 AI Provider 容灾切换"
+  default_prompt: "使用 $dbear-mihomo-ai-failover 诊断当前 AI Provider 网络状态，先不要修改配置。"
