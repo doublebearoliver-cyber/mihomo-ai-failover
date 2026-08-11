@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented here.
 
+## [Unreleased]
+
+### Changed
+
+- Renamed the bundled user-maintained Agent Skill to
+  `dbear-mihomo-ai-failover`. The product, plugin, CLI, MCP server, and Python
+  package keep the `mihomo-ai-failover` name.
+
 ## [0.2.2] - 2026-08-09
 
 ### Fixed

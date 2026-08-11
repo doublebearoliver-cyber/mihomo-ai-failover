@@ -32,7 +32,7 @@ The package exposes:
 
 - `mihomo-ai-failover`: CLI and daemon;
 - `mihomo-ai-failover-mcp`: local stdio MCP server;
-- `mihomo-ai-failover`: shared Codex and Claude Code Skill.
+- `dbear-mihomo-ai-failover`: shared Codex and Claude Code Skill.
 
 Its current contract covers OpenAI, WorkBuddy (China), Kimi, MiniMax, and
 Mavis. Provider-specific adaptation details live in the Skill's `references/`

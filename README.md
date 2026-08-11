@@ -174,7 +174,7 @@ claude plugin marketplace add doublebearoliver-cyber/mihomo-ai-failover
 claude plugin install mihomo-ai-failover@mihomo-ai-failover
 ```
 
-Both plugins bundle the same `mihomo-ai-failover` Skill and local MCP server.
+Both plugins bundle the same `dbear-mihomo-ai-failover` Skill and local MCP server.
 MCP mutations are disabled by default and require both local opt-in and an
 exact server-enforced confirmation.
 
