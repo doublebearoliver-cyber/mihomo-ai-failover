@@ -1,7 +1,7 @@
 # Mihomo AI Failover plugin
 
 This plugin exposes the local failover CLI through a stdio MCP server and adds
-the `mihomo-ai-failover` Skill to Codex and Claude Code.
+the `dbear-mihomo-ai-failover` Skill to Codex and Claude Code.
 
 Its contract covers isolated profiles for OpenAI, WorkBuddy (China), Kimi,
 MiniMax, and Mavis, plus private local adaptation from observed Mihomo traffic.

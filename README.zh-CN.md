@@ -191,7 +191,7 @@ codex plugin marketplace add doublebearoliver-cyber/mihomo-ai-failover
 codex plugin add mihomo-ai-failover@mihomo-ai-failover
 ```
 
-插件提供 `mihomo-ai-failover` Skill 和本地 stdio MCP。启动器优先
+插件提供 `dbear-mihomo-ai-failover` Skill 和本地 stdio MCP。启动器优先
 复用已安装的 `mihomo-ai-failover-mcp`；找不到时才通过 `uv` 从固定
 `v0.2.2` 标签获取。它不会开启 TCP 监听。
 
